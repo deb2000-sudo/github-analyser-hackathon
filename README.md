@@ -88,11 +88,10 @@ gcloud firestore databases create --location="$REGION" --project="$PROJECT_ID" 2
 # GCS cache bucket
 gsutil mb -l "$REGION" "gs://${BUCKET}" 2>/dev/null || true
 
-# GitHub token (recommended — avoids rate limits)
-echo -n "ghp_your_token" | gcloud secrets create github-token \
-  --data-file=- --project="$PROJECT_ID" 2>/dev/null || \
-echo -n "ghp_your_token" | gcloud secrets versions add github-token \
-  --data-file=- --project="$PROJECT_ID"
+# Create Secret Manager secrets once (values from your .env) — see cloudbuild.yaml header
+# Secret ids: firebase-project-id, firebase-private-key-id, firebase-private-key,
+#   firebase-client-email, firebase-client-id, firebase-database-url,
+#   firebase-web-api-key, github-token
 
 PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')
 RUN_SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
@@ -103,19 +102,15 @@ for ROLE in roles/aiplatform.user roles/datastore.user roles/storage.objectAdmin
     --member="serviceAccount:${RUN_SA}" --role="$ROLE" --quiet
 done
 
-# Cloud Build SA — deploy to Cloud Run + push images
+# Cloud Build SA — deploy + secret IAM (cloudbuild.yaml ensure-secret-access step)
 CB_SA="${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com"
-for ROLE in roles/run.admin roles/artifactregistry.writer roles/iam.serviceAccountUser; do
+for ROLE in roles/run.admin roles/artifactregistry.writer roles/iam.serviceAccountUser roles/secretmanager.admin; do
   gcloud projects add-iam-policy-binding "$PROJECT_ID" \
     --member="serviceAccount:${CB_SA}" --role="$ROLE" --quiet
 done
-
-# Allow Cloud Run to read GitHub secret
-gcloud secrets add-iam-policy-binding github-token \
-  --member="serviceAccount:${RUN_SA}" \
-  --role=roles/secretmanager.secretAccessor \
-  --project="$PROJECT_ID"
 ```
+
+Firebase and `GITHUB_TOKEN` are mounted from Secret Manager by `cloudbuild.yaml` (not plain env vars). See substitutions `_SEC_FIREBASE_*` and `_GITHUB_TOKEN_SECRET` in that file.
 
 ### 2. Deploy with Cloud Build
 
@@ -135,14 +130,16 @@ The final deploy step prints the **Cloud Run URL**.
 | `_GCS_BUCKET` | *(required)* | `EVALUATION_BUCKET_NAME` |
 | `_SERVICE` | `github-analyser` | Cloud Run service name |
 | `_VERTEX_MODEL` | `gemini-2.5-flash` | Gemini model |
-| `_GITHUB_TOKEN_SECRET` | `github-token` | Secret Manager id; set empty to skip |
+| `_GITHUB_TOKEN_SECRET` | `github-token` | Secret id for `GITHUB_TOKEN` |
+| `_SEC_FIREBASE_*` | see table above | Firebase secret ids |
+| `_MOUNT_SECRETS` | `true` | Set `false` to skip all secrets (ADC only) |
 | `_RUN_SERVICE_ACCOUNT` | *(empty)* | Custom runtime SA email |
 
 **Notes:**
-- On Cloud Run, Firebase/Firestore uses the **runtime service account ADC** (no `FIREBASE_PRIVATE_KEY` in env).
-- Vertex AI also uses the runtime SA — it must have `roles/aiplatform.user`.
+- All Firebase + `GITHUB_TOKEN` env vars come from Secret Manager via `cloudbuild.yaml`.
+- Vertex AI uses the **Cloud Run runtime SA** (ADC), not the Firebase Admin key.
+- Create secrets once before first deploy (instructions in `cloudbuild.yaml` header).
 - Image tag uses `$BUILD_ID` (works with `gcloud builds submit` and Git triggers).
-- `cloudbuild.yaml` creates the Artifact Registry repo `cloud-run-source-deploy` if missing.
 
 ### Manual deploy (alternative)
 

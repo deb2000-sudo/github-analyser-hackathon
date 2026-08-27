@@ -1,16 +1,23 @@
 # Deploy github-analyser to Cloud Run via Cloud Build.
 #
-# One-time setup (see README.md):
-#   - Enable APIs, create Firestore + GCS bucket, grant IAM to Cloud Run SA
-#   - Create Secret Manager secret "github-token" (optional but recommended)
+# One-time: create secrets in Secret Manager (values from your local .env).
+# Secret ids must match the substitutions below (override via --substitutions if needed).
+#
+#   gcloud secrets create firebase-project-id --replication-policy=automatic --project=$PROJECT_ID
+#   echo -n 'YOUR_VALUE' | gcloud secrets versions add firebase-project-id --data-file=- --project=$PROJECT_ID
+#   # repeat for: firebase-private-key-id, firebase-private-key, firebase-client-email,
+#   #   firebase-client-id, firebase-database-url, firebase-web-api-key, github-token
 #
 # Deploy:
 #   export PROJECT_ID=nxt-acad-hackathon
 #   export REGION=us-central1
-#   export BUCKET=${PROJECT_ID}-hackathon-evaluations
+#   export BUCKET=nxt-acad-hackathon-hackathon-evaluations
 #   gcloud builds submit --config cloudbuild.yaml \
 #     --substitutions=_REGION=${REGION},_GCS_BUCKET=${BUCKET} \
 #     --project=${PROJECT_ID}
+#
+# This file mounts all Firebase + GITHUB_TOKEN env vars from Secret Manager on Cloud Run.
+# Non-secret config is set via --set-env-vars in the deploy step.
 
 substitutions:
   _REGION: us-central1
@@ -18,14 +25,18 @@ substitutions:
   _AR_REPO: cloud-run-source-deploy
   _GCS_BUCKET: ""
   _VERTEX_MODEL: gemini-2.5-flash
-  # Secret Manager secret id (not full path). Create with:
-  #   echo -n "ghp_..." | gcloud secrets create github-token --data-file=-
-  _GITHUB_TOKEN_SECRET: github-token
-  # Cloud Run runtime SA email. Empty = project default compute SA.
   _RUN_SERVICE_ACCOUNT: ""
+  _MOUNT_SECRETS: "true"
+  _GITHUB_TOKEN_SECRET: github-token
+  _SEC_FIREBASE_PROJECT_ID: firebase-project-id
+  _SEC_FIREBASE_PRIVATE_KEY_ID: firebase-private-key-id
+  _SEC_FIREBASE_PRIVATE_KEY: firebase-private-key
+  _SEC_FIREBASE_CLIENT_EMAIL: firebase-client-email
+  _SEC_FIREBASE_CLIENT_ID: firebase-client-id
+  _SEC_FIREBASE_DATABASE_URL: firebase-database-url
+  _SEC_FIREBASE_WEB_API_KEY: firebase-web-api-key
 
 steps:
-  # Ensure Artifact Registry repo exists (idempotent)
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk
     id: ensure-artifact-registry
     entrypoint: bash
@@ -60,6 +71,50 @@ steps:
       - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}
 
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    id: ensure-secret-access
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        if [[ "${_MOUNT_SECRETS}" != "true" ]]; then
+          echo "Skipping secret IAM (_MOUNT_SECRETS=false)"
+          exit 0
+        fi
+
+        if [[ -n "${_RUN_SERVICE_ACCOUNT}" ]]; then
+          RUN_SA="${_RUN_SERVICE_ACCOUNT}"
+        else
+          PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')
+          RUN_SA="$${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
+        fi
+
+        for SECRET_ID in \
+          "${_GITHUB_TOKEN_SECRET}" \
+          "${_SEC_FIREBASE_PROJECT_ID}" \
+          "${_SEC_FIREBASE_PRIVATE_KEY_ID}" \
+          "${_SEC_FIREBASE_PRIVATE_KEY}" \
+          "${_SEC_FIREBASE_CLIENT_EMAIL}" \
+          "${_SEC_FIREBASE_CLIENT_ID}" \
+          "${_SEC_FIREBASE_DATABASE_URL}" \
+          "${_SEC_FIREBASE_WEB_API_KEY}"; do
+          if [[ -z "$${SECRET_ID}" ]]; then
+            continue
+          fi
+          if ! gcloud secrets describe "$${SECRET_ID}" --project="$PROJECT_ID" >/dev/null 2>&1; then
+            echo "ERROR: Secret '$${SECRET_ID}' not found in project $PROJECT_ID" >&2
+            echo "Create it once (see cloudbuild.yaml header), then re-run deploy." >&2
+            exit 1
+          fi
+          gcloud secrets add-iam-policy-binding "$${SECRET_ID}" \
+            --member="serviceAccount:$${RUN_SA}" \
+            --role=roles/secretmanager.secretAccessor \
+            --project="$PROJECT_ID" \
+            --quiet
+        done
+        echo "Secret accessor granted to $${RUN_SA}"
+
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
     id: deploy
     entrypoint: bash
     args:
@@ -74,6 +129,7 @@ steps:
         ENV_VARS="$${ENV_VARS},GEMINI_MODEL=${_VERTEX_MODEL}"
         ENV_VARS="$${ENV_VARS},VERTEX_ENABLED=true"
         ENV_VARS="$${ENV_VARS},FIRESTORE_COLLECTION_JOBS=githubanalysis_jobs"
+        ENV_VARS="$${ENV_VARS},GCS_CACHE_PREFIX=github-cache"
         ENV_VARS="$${ENV_VARS},HOST=0.0.0.0"
 
         DEPLOY_ARGS=(
@@ -97,8 +153,29 @@ steps:
           DEPLOY_ARGS+=(--service-account="${_RUN_SERVICE_ACCOUNT}")
         fi
 
-        if [[ -n "${_GITHUB_TOKEN_SECRET}" ]]; then
-          DEPLOY_ARGS+=(--set-secrets="GITHUB_TOKEN=${_GITHUB_TOKEN_SECRET}:latest")
+        if [[ "${_MOUNT_SECRETS}" == "true" ]]; then
+          SECRETS=""
+          add_secret() {
+            local env_name="$${1}"
+            local secret_id="$${2}"
+            if [[ -n "$${secret_id}" ]]; then
+              if [[ -n "$${SECRETS}" ]]; then
+                SECRETS="$${SECRETS},"
+              fi
+              SECRETS="$${SECRETS}$${env_name}=$${secret_id}:latest"
+            fi
+          }
+          add_secret GITHUB_TOKEN "${_GITHUB_TOKEN_SECRET}"
+          add_secret FIREBASE_PROJECT_ID "${_SEC_FIREBASE_PROJECT_ID}"
+          add_secret FIREBASE_PRIVATE_KEY_ID "${_SEC_FIREBASE_PRIVATE_KEY_ID}"
+          add_secret FIREBASE_PRIVATE_KEY "${_SEC_FIREBASE_PRIVATE_KEY}"
+          add_secret FIREBASE_CLIENT_EMAIL "${_SEC_FIREBASE_CLIENT_EMAIL}"
+          add_secret FIREBASE_CLIENT_ID "${_SEC_FIREBASE_CLIENT_ID}"
+          add_secret FIREBASE_DATABASE_URL "${_SEC_FIREBASE_DATABASE_URL}"
+          add_secret FIREBASE_WEB_API_KEY "${_SEC_FIREBASE_WEB_API_KEY}"
+          if [[ -n "$${SECRETS}" ]]; then
+            DEPLOY_ARGS+=(--set-secrets="$${SECRETS}")
+          fi
         fi
 
         gcloud "$${DEPLOY_ARGS[@]}"
@@ -116,4 +193,4 @@ options:
   logging: CLOUD_LOGGING_ONLY
 
 # Cloud Build SA needs: roles/run.admin, roles/artifactregistry.writer,
-# roles/iam.serviceAccountUser (on the Cloud Run runtime SA).
+# roles/iam.serviceAccountUser, roles/secretmanager.admin (for ensure-secret-access step).
