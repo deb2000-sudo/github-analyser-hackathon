@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException
@@ -19,7 +20,10 @@ from app.schemas import (
     JobResponse,
     MetricCatalogueEntry,
     MetricsCatalogueResponse,
+    RubricCatalogueEntry,
+    RubricsCatalogueResponse,
 )
+from app.scoring.rubrics import rubric_catalogue
 
 router = APIRouter()
 
@@ -36,11 +40,10 @@ async def _enqueue(req: AnalyzeRequest, background: BackgroundTasks) -> Job:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    context = req.context.model_dump(exclude_none=True) if req.context else None
-    if "solution_fit" in metrics and not (context and context.get("problem_statement")):
+    context = req.context.model_dump(exclude_none=True)
+    if not (context.get("provided_context") or "").strip():
         raise HTTPException(
-            status_code=400,
-            detail="solution_fit requires context.problem_statement (hackathon problem statement)",
+            status_code=400, detail="context.provided_context must be a non-empty string"
         )
 
     job = Job(
@@ -67,6 +70,16 @@ async def health() -> HealthResponse:
 @router.get("/metrics", response_model=MetricsCatalogueResponse)
 async def list_metrics() -> MetricsCatalogueResponse:
     return MetricsCatalogueResponse(metrics=[MetricCatalogueEntry(**m) for m in catalogue()])
+
+
+@router.get("/rubrics", response_model=RubricsCatalogueResponse)
+async def list_rubrics() -> RubricsCatalogueResponse:
+    rubrics = rubric_catalogue()
+    max_total = sum(float(r.get("weight") or 0) for r in rubrics)
+    return RubricsCatalogueResponse(
+        rubrics=[RubricCatalogueEntry(**r) for r in rubrics],
+        max_total_score=max_total,
+    )
 
 
 @router.post("/analyze", response_model=JobCreatedResponse)
@@ -102,11 +115,20 @@ async def analyze_batch(
 
 
 @router.get("/analyze/{job_id}", response_model=JobResponse)
-async def get_job(job_id: str) -> JobResponse:
+async def get_job(job_id: str, wait_seconds: int = 0) -> JobResponse:
+    """Poll job status. Pass wait_seconds (max 120) to block until done."""
     store = JobStore()
-    job = await asyncio.to_thread(store.get, job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="job not found")
+    wait_seconds = max(0, min(wait_seconds, 120))
+    deadline = time.monotonic() + wait_seconds
+
+    while True:
+        job = await asyncio.to_thread(store.get, job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="job not found")
+        if job.status in ("succeeded", "failed") or time.monotonic() >= deadline:
+            break
+        await asyncio.sleep(0.5)
+
     return JobResponse(
         job_id=job.id,
         status=job.status,  # type: ignore[arg-type]
@@ -119,3 +141,32 @@ async def get_job(job_id: str) -> JobResponse:
         created_at=job.created_at.isoformat() if job.created_at else None,
         updated_at=job.updated_at.isoformat() if job.updated_at else None,
     )
+
+
+@router.post("/analyze/sync", response_model=JobResponse)
+async def analyze_sync(body: AnalyzeRequest, wait_seconds: int = 120) -> JobResponse:
+    """Submit analysis and wait for the result (max wait_seconds=120)."""
+    wait_seconds = max(5, min(wait_seconds, 120))
+    try:
+        metrics = resolve_requested(body.metrics)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    context = body.context.model_dump(exclude_none=True)
+    if not (context.get("provided_context") or "").strip():
+        raise HTTPException(
+            status_code=400, detail="context.provided_context must be a non-empty string"
+        )
+
+    job = Job(
+        id=new_job_id(),
+        status=JobStatus.queued.value,
+        github_url=body.github_url,
+        metrics_requested=metrics,
+        options=_options_to_dict(body),
+        context=context,
+    )
+    store = JobStore()
+    await asyncio.to_thread(store.create, job)
+    await run_pipeline(job.id)
+    return await get_job(job.id, wait_seconds=0)

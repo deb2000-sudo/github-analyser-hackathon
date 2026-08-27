@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from app.github.validation import (
+    InvalidGithubUrlError,
+    UnsupportedGithubUrlError,
+    normalize_github_repo_url,
+)
 
 MetricName = Literal[
     "fullstack", "ai_usage", "agent_analysis", "repo_health", "solution_fit"
@@ -12,23 +18,46 @@ Confidence = Literal["low", "medium", "high"]
 AiIntegrationType = Literal["none", "wrapper", "rag", "agentic"]
 
 
-class SubmissionContext(BaseModel):
-    """Hackathon problem + claimed solution — used to ground evaluation."""
+class RubricDefinition(BaseModel):
+    id: str
+    label: str | None = None
+    weight: float = Field(default=0, ge=0)
+    max_score: float = Field(default=10, gt=0)
+    metric: str | None = None
 
-    problem_statement: str = Field(
+
+class ScoringConfig(BaseModel):
+    rubrics: list[RubricDefinition] | None = None
+
+
+class SubmissionContext(BaseModel):
+    """Free-form project context paragraph used to ground repository evaluation."""
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "provided_context": (
+                    "This project is a multi-agent LangGraph study planner that uses RAG over "
+                    "course materials and Gemini to help students build personalized study schedules."
+                ),
+                "rubrics": ["Uses an LLM", "Has real agent orchestration", "Full-stack demo"],
+            }
+        }
+    )
+
+    provided_context: str = Field(
         ...,
         min_length=1,
-        description="What the hackathon asked teams to build / solve.",
+        description="Plain-text paragraph describing the project — what it is and what it should do.",
     )
-    solution_description: str | None = Field(
-        default=None,
-        description="Team's stated approach / solution write-up from the submission form.",
-    )
-    team_name: str | None = None
     track: str | None = None
     rubrics: list[str] | None = Field(
         default=None,
         description="Optional judging rubrics / must-haves the LLM should check against.",
+    )
+    scoring: ScoringConfig | None = Field(
+        default=None,
+        description="Optional per-request rubric weight overrides.",
     )
     extra: dict[str, Any] = Field(
         default_factory=dict,
@@ -42,24 +71,64 @@ class AnalyzeOptions(BaseModel):
     fullstack: dict[str, Any] = Field(default_factory=dict)
     repo_health: dict[str, Any] = Field(default_factory=dict)
     solution_fit: dict[str, Any] = Field(default_factory=dict)
+    scoring: ScoringConfig | None = None
 
 
 class AnalyzeRequest(BaseModel):
-    github_url: str
-    context: SubmissionContext | None = Field(
-        default=None,
-        description="Problem statement + solution context for hackathon evaluation.",
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "github_url": "https://github.com/owner/repo",
+                "context": {
+                    "provided_context": (
+                        "This project is a multi-agent LangGraph study planner that uses RAG over "
+                        "course materials and Gemini to help students build personalized study schedules."
+                    ),
+                    "rubrics": ["Uses an LLM", "Has real agent orchestration", "Full-stack demo"],
+                },
+            }
+        }
     )
-    metrics: list[str] | None = None
+
+    github_url: str
+    context: SubmissionContext = Field(
+        ...,
+        description="Required — includes `provided_context` paragraph for solution fit evaluation.",
+    )
+    metrics: list[str] | None = Field(
+        default=None,
+        description="Ignored for now — all metrics are always evaluated.",
+    )
     options: AnalyzeOptions | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_legacy_context_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        ctx = data.get("context")
+        if isinstance(ctx, dict):
+            legacy = [
+                k
+                for k in ("problem_statement", "solution_description", "team_name", "text")
+                if k in ctx
+            ]
+            if legacy:
+                raise ValueError(
+                    "Use context.provided_context (single combined string). "
+                    f"Unsupported fields: {legacy}"
+                )
+        return data
 
     @field_validator("github_url")
     @classmethod
     def validate_github_url(cls, v: str) -> str:
-        v = v.strip().rstrip("/")
-        if "github.com" not in v:
-            raise ValueError("github_url must be a GitHub repository URL")
-        return v
+        try:
+            return normalize_github_repo_url(v)
+        except InvalidGithubUrlError as exc:
+            raise ValueError(str(exc)) from exc
+        except UnsupportedGithubUrlError as exc:
+            raise ValueError(str(exc)) from exc
 
 
 class BatchAnalyzeRequest(BaseModel):
@@ -103,6 +172,20 @@ class MetricCatalogueEntry(BaseModel):
 
 class MetricsCatalogueResponse(BaseModel):
     metrics: list[MetricCatalogueEntry]
+
+
+class RubricCatalogueEntry(BaseModel):
+    id: str
+    label: str
+    weight: float
+    weight_percent: float | None = None
+    max_score: float
+    metric: str | None = None
+
+
+class RubricsCatalogueResponse(BaseModel):
+    rubrics: list[RubricCatalogueEntry]
+    max_total_score: float
 
 
 class HealthResponse(BaseModel):

@@ -1,39 +1,119 @@
+# Deploy github-analyser to Cloud Run via Cloud Build.
+#
+# One-time setup (see README.md):
+#   - Enable APIs, create Firestore + GCS bucket, grant IAM to Cloud Run SA
+#   - Create Secret Manager secret "github-token" (optional but recommended)
+#
+# Deploy:
+#   export PROJECT_ID=nxt-acad-hackathon
+#   export REGION=us-central1
+#   export BUCKET=${PROJECT_ID}-hackathon-evaluations
+#   gcloud builds submit --config cloudbuild.yaml \
+#     --substitutions=_REGION=${REGION},_GCS_BUCKET=${BUCKET} \
+#     --project=${PROJECT_ID}
+
 substitutions:
   _REGION: us-central1
   _SERVICE: github-analyser
+  _AR_REPO: cloud-run-source-deploy
   _GCS_BUCKET: ""
-  _VERTEX_MODEL: gemini-2.0-flash
+  _VERTEX_MODEL: gemini-2.5-flash
+  # Secret Manager secret id (not full path). Create with:
+  #   echo -n "ghp_..." | gcloud secrets create github-token --data-file=-
+  _GITHUB_TOKEN_SECRET: github-token
+  # Cloud Run runtime SA email. Empty = project default compute SA.
+  _RUN_SERVICE_ACCOUNT: ""
 
 steps:
+  # Ensure Artifact Registry repo exists (idempotent)
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    id: ensure-artifact-registry
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        gcloud artifacts repositories describe "${_AR_REPO}" \
+          --location="${_REGION}" \
+          --project="$PROJECT_ID" 2>/dev/null || \
+        gcloud artifacts repositories create "${_AR_REPO}" \
+          --repository-format=docker \
+          --location="${_REGION}" \
+          --description="Cloud Run images for github-analyser" \
+          --project="$PROJECT_ID"
+
   - name: gcr.io/cloud-builders/docker
+    id: build
     args:
       - build
       - -t
-      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/${_SERVICE}:$SHORT_SHA
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$BUILD_ID
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:latest
       - .
 
   - name: gcr.io/cloud-builders/docker
+    id: push
     args:
       - push
-      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/${_SERVICE}:$SHORT_SHA
+      - --all-tags
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}
 
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk
-    entrypoint: gcloud
+    id: deploy
+    entrypoint: bash
     args:
-      - run
-      - deploy
-      - ${_SERVICE}
-      - --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/${_SERVICE}:$SHORT_SHA
-      - --region=${_REGION}
-      - --platform=managed
-      - --allow-unauthenticated
-      - --memory=1Gi
-      - --cpu=1
-      - --timeout=300
-      - --set-env-vars=GCP_PROJECT_ID=$PROJECT_ID,GCP_LOCATION=${_REGION},GCS_BUCKET=${_GCS_BUCKET},VERTEX_MODEL=${_VERTEX_MODEL},VERTEX_ENABLED=true,HOST=0.0.0.0
+      - -c
+      - |
+        set -euo pipefail
+        IMAGE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$BUILD_ID"
+
+        ENV_VARS="GOOGLE_CLOUD_PROJECT=$PROJECT_ID"
+        ENV_VARS="$${ENV_VARS},GOOGLE_CLOUD_LOCATION=${_REGION}"
+        ENV_VARS="$${ENV_VARS},EVALUATION_BUCKET_NAME=${_GCS_BUCKET}"
+        ENV_VARS="$${ENV_VARS},GEMINI_MODEL=${_VERTEX_MODEL}"
+        ENV_VARS="$${ENV_VARS},VERTEX_ENABLED=true"
+        ENV_VARS="$${ENV_VARS},FIRESTORE_COLLECTION_JOBS=githubanalysis_jobs"
+        ENV_VARS="$${ENV_VARS},HOST=0.0.0.0"
+
+        DEPLOY_ARGS=(
+          run deploy "${_SERVICE}"
+          --image="$${IMAGE}"
+          --region="${_REGION}"
+          --platform=managed
+          --allow-unauthenticated
+          --port=8080
+          --memory=1Gi
+          --cpu=1
+          --timeout=300
+          --concurrency=10
+          --min-instances=0
+          --max-instances=10
+          --set-env-vars="$${ENV_VARS}"
+          --project="$PROJECT_ID"
+        )
+
+        if [[ -n "${_RUN_SERVICE_ACCOUNT}" ]]; then
+          DEPLOY_ARGS+=(--service-account="${_RUN_SERVICE_ACCOUNT}")
+        fi
+
+        if [[ -n "${_GITHUB_TOKEN_SECRET}" ]]; then
+          DEPLOY_ARGS+=(--set-secrets="GITHUB_TOKEN=${_GITHUB_TOKEN_SECRET}:latest")
+        fi
+
+        gcloud "$${DEPLOY_ARGS[@]}"
+
+        gcloud run services describe "${_SERVICE}" \
+          --region="${_REGION}" \
+          --project="$PROJECT_ID" \
+          --format='value(status.url)'
 
 images:
-  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/${_SERVICE}:$SHORT_SHA
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$BUILD_ID
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:latest
 
 options:
   logging: CLOUD_LOGGING_ONLY
+
+# Cloud Build SA needs: roles/run.admin, roles/artifactregistry.writer,
+# roles/iam.serviceAccountUser (on the Cloud Run runtime SA).

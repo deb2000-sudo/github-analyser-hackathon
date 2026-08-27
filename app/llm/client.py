@@ -17,10 +17,14 @@ class LLMClient:
         if self.settings.llm_enabled:
             from google import genai
 
+            # Explicit ADC (gcloud user locally / Cloud Run SA in prod).
+            # Do not omit credentials — google-auth may otherwise pick up the
+            # Firebase Admin SA from the process and Vertex returns 403.
             self._client = genai.Client(
                 vertexai=True,
-                project=self.settings.gcp_project_id,
+                project=self.settings.resolved_project_id,
                 location=self.settings.gcp_location,
+                credentials=self.settings.vertex_credentials(),
             )
 
     @property
@@ -30,7 +34,7 @@ class LLMClient:
     async def judge_json(self, *, system: str, user: str) -> dict[str, Any]:
         if not self._client:
             raise RuntimeError(
-                "Vertex AI is not configured (set GCP_PROJECT_ID and enable Vertex AI)"
+                "Vertex AI is not configured (set GOOGLE_CLOUD_PROJECT / GCP_PROJECT_ID and enable Vertex AI)"
             )
         return await asyncio.to_thread(self._judge_sync, system, user)
 
@@ -38,15 +42,15 @@ class LLMClient:
         from google.genai import types
 
         assert self._client is not None
-        resp = self._client.models.generate_content(
+        chat = self._client.chats.create(
             model=self.settings.vertex_model,
-            contents=user,
             config=types.GenerateContentConfig(
                 temperature=0,
                 response_mime_type="application/json",
                 system_instruction=system,
             ),
         )
+        resp = chat.send_message(user)
         content = (resp.text or "").strip() or "{}"
         try:
             return json.loads(content)

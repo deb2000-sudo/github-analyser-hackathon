@@ -1,112 +1,33 @@
 from __future__ import annotations
 
-import json
-import re
 from typing import Any
 
 from app.github.client import PATH_HINTS, paths_matching
 from app.llm.client import LLMClient
-from app.metrics.ai_packages import AI_PACKAGES, is_agent_framework
+from app.metrics.ai_imports import (
+    reconcile_ai_dependencies,
+    scan_code_for_ai_imports,
+    scan_generic_ai_usage,
+    scan_manifests,
+    select_ai_evidence_paths,
+)
+from app.metrics.ai_packages import AI_PACKAGES
 from app.metrics.base import Metric, MetricContext, MetricResult
+from app.scoring.llm_providers import detect_llm_providers
 from app.pipeline.prompt import build_system_prompt, build_user_prompt
 
 CONFIDENCE_RANK = {"low": 1, "medium": 2, "high": 3}
 
 
-def _normalize_pkg(name: str) -> str:
-    name = name.strip().strip("\"'").lower()
-    # strip version pins like openai==1.0.0 or openai>=1
-    name = re.split(r"[<=>!~\s\[]", name, maxsplit=1)[0]
-    # npm scopes already include @
-    return name
-
-
-def scan_manifests(manifests: dict[str, str]) -> tuple[list[str], list[str]]:
-    """Return (all_ai_deps, agent_framework_deps)."""
-    found: set[str] = set()
-    for path, content in manifests.items():
-        lower_path = path.lower()
-        if lower_path.endswith("package.json"):
-            try:
-                data = json.loads(content)
-            except json.JSONDecodeError:
-                continue
-            deps = {
-                **(data.get("dependencies") or {}),
-                **(data.get("devDependencies") or {}),
-                **(data.get("peerDependencies") or {}),
-            }
-            for pkg in deps:
-                key = pkg.lower()
-                if key in AI_PACKAGES or key.lstrip("@").split("/")[-1] in {
-                    k.lstrip("@").split("/")[-1] for k in AI_PACKAGES
-                }:
-                    # Match exact or known scoped names
-                    if key in AI_PACKAGES:
-                        found.add(key)
-                    else:
-                        for known in AI_PACKAGES:
-                            if known == key or known.endswith("/" + key.split("/")[-1]):
-                                found.add(known)
-                                break
-        elif lower_path.endswith(("requirements.txt", "requirements-dev.txt")):
-            for line in content.splitlines():
-                line = line.strip()
-                if not line or line.startswith("#") or line.startswith("-"):
-                    continue
-                pkg = _normalize_pkg(line)
-                if pkg in AI_PACKAGES:
-                    found.add(pkg)
-        elif lower_path.endswith("pyproject.toml"):
-            for m in re.finditer(
-                r'["\']([a-zA-Z0-9_.\-]+)["\']\s*[=>~<]|^\s*([a-zA-Z0-9_.\-]+)\s*[=>~<]',
-                content,
-                re.M,
-            ):
-                pkg = _normalize_pkg(m.group(1) or m.group(2) or "")
-                if pkg in AI_PACKAGES:
-                    found.add(pkg)
-            # poetry/pep621 dependency tables — also catch bare package names on lines
-            for line in content.splitlines():
-                m = re.match(r'^\s*([a-zA-Z0-9_.\-]+)\s*=', line)
-                if m:
-                    pkg = _normalize_pkg(m.group(1))
-                    if pkg in AI_PACKAGES:
-                        found.add(pkg)
-        elif lower_path.endswith("go.mod"):
-            for line in content.splitlines():
-                parts = line.strip().split()
-                if len(parts) >= 1 and any(k in parts[0].lower() for k in ("openai", "langchain")):
-                    found.add(parts[0].split("/")[-1].lower())
-
-    ai_list = sorted(found)
-    agent_list = [p for p in ai_list if is_agent_framework(p)]
-    return ai_list, agent_list
-
-
-def _import_evidence_paths(tree_paths: list[str], deps: list[str]) -> list[str]:
-    """Heuristic: files that likely import the found packages."""
-    hints = []
-    patterns = [re.compile(re.escape(d.split("/")[-1].replace("-", "[-_]")), re.I) for d in deps]
-    for path in tree_paths:
-        if not path.endswith((".py", ".ts", ".tsx", ".js", ".jsx", ".mjs")):
-            continue
-        base = path.lower()
-        if any(p.search(base) for p in patterns) or PATH_HINTS.search(path):
-            hints.append(path)
-    # Prefer agent-ish paths first
-    hints.sort(key=lambda p: (0 if PATH_HINTS.search(p) else 1, p))
-    return hints[:25]
-
-
 class AiUsageMetric(Metric):
     name = "ai_usage"
-    tier = "static"  # LLM half is gated; catalogue shows static-first
+    tier = "static"
     description = (
-        "Static scan of AI dependency manifests; LLM classifies integration type only if deps found."
+        "Verifies AI/agent dependencies from manifests and source imports; "
+        "LLM classifies integration type from evidenced files."
     )
     default_options = {"min_confidence": "medium", "max_evidence_files": 12}
-    skippable_when = "user deselects it; LLM half skipped when no AI deps found"
+    skippable_when = "no verified AI packages or AI code patterns in scanned files"
     output_schema = {
         "type": "object",
         "properties": {
@@ -115,19 +36,74 @@ class AiUsageMetric(Metric):
             "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
             "evidence_files": {"type": "array", "items": {"type": "string"}},
             "agent_frameworks_found": {"type": "array", "items": {"type": "string"}},
+            "manifest_only_deps": {"type": "array"},
+            "rejected_false_manifest_deps": {"type": "array"},
+            "code_evidence_by_package": {"type": "object"},
+            "llm_providers": {"type": "object"},
             "reasoning": {"type": "string"},
         },
     }
 
     async def run(self, ctx: MetricContext) -> MetricResult:
         opts = {**self.default_options, **ctx.options}
-        ai_deps, agent_deps = scan_manifests(ctx.snapshot.package_manifests)
+        raw_manifest_deps, _ = scan_manifests(ctx.snapshot.package_manifests)
+        tree_paths = [t["path"] for t in ctx.snapshot.tree]
 
-        # Stash for agent_analysis / pipeline gating
-        ctx.extras["ai_dependencies_found"] = ai_deps
+        prelim_paths = select_ai_evidence_paths(
+            tree_paths,
+            ctx.snapshot.file_contents,
+            raw_manifest_deps,
+            {},
+            max_files=int(opts.get("max_evidence_files", 12)) + 8,
+        )
+        gh = ctx.extras.get("github_client")
+        if gh and prelim_paths and not ctx.extras.get("skip_file_fetch"):
+            await gh.fetch_files(ctx.snapshot, prelim_paths, max_file_kb=40)
+
+        code_hits = scan_code_for_ai_imports(ctx.snapshot.file_contents)
+        reconciled = reconcile_ai_dependencies(raw_manifest_deps, code_hits)
+        verified_deps = reconciled["ai_dependencies_found"]
+        agent_deps = reconciled["agent_frameworks_found"]
+        generic_files = scan_generic_ai_usage(ctx.snapshot.file_contents)
+
+        ctx.extras["ai_dependencies_found"] = verified_deps
         ctx.extras["agent_frameworks_found"] = agent_deps
 
-        if not ai_deps:
+        evidence_candidates = select_ai_evidence_paths(
+            tree_paths,
+            ctx.snapshot.file_contents,
+            verified_deps,
+            reconciled["code_evidence_by_package"],
+            max_files=int(opts.get("max_evidence_files", 12)),
+        )
+        if not evidence_candidates and generic_files:
+            evidence_candidates = generic_files[: int(opts.get("max_evidence_files", 12))]
+
+        if gh and evidence_candidates and not ctx.extras.get("skip_file_fetch"):
+            missing = [p for p in evidence_candidates if p not in ctx.snapshot.file_contents]
+            if missing:
+                await gh.fetch_files(ctx.snapshot, missing, max_file_kb=40)
+
+        evidence_files = [p for p in evidence_candidates if p in ctx.snapshot.file_contents]
+
+        llm_providers = detect_llm_providers(
+            verified_deps, ctx.snapshot.file_contents, evidence_files
+        )
+
+        diagnostics = {
+            "manifest_deps_raw": reconciled["manifest_deps_raw"],
+            "manifest_only_deps": reconciled["manifest_only_deps"],
+            "rejected_false_manifest_deps": reconciled["rejected_false_manifest_deps"],
+            "code_evidence_by_package": reconciled["code_evidence_by_package"],
+        }
+
+        if not verified_deps and not generic_files:
+            rejected = reconciled["rejected_false_manifest_deps"]
+            note = ""
+            if rejected:
+                note = (
+                    f" Manifest listed {', '.join(rejected)} but no matching imports in source — ignored."
+                )
             return MetricResult(
                 name=self.name,
                 status="ok",
@@ -137,39 +113,56 @@ class AiUsageMetric(Metric):
                     "confidence": "high",
                     "evidence_files": [],
                     "agent_frameworks_found": [],
-                    "reasoning": "No known AI packages found in dependency manifests.",
+                    "llm_providers": llm_providers,
+                    "reasoning": f"No verified AI SDK imports or AI API usage in scanned files.{note}",
+                    **diagnostics,
                 },
             )
 
-        tree_paths = [t["path"] for t in ctx.snapshot.tree]
-        evidence_candidates = _import_evidence_paths(tree_paths, ai_deps)
-        # Also include paths matching agent hints
-        evidence_candidates = list(
-            dict.fromkeys(evidence_candidates + paths_matching(ctx.snapshot.tree, PATH_HINTS))
-        )[: int(opts.get("max_evidence_files", 12))]
+        hints = {
+            "verified_ai_dependencies": verified_deps,
+            "agent_frameworks_found": agent_deps,
+            "manifest_only_deps": reconciled["manifest_only_deps"],
+            "rejected_false_manifest_deps": reconciled["rejected_false_manifest_deps"],
+            "code_evidence_by_package": reconciled["code_evidence_by_package"],
+            "generic_ai_files": generic_files[:8],
+        }
 
-        gh = ctx.extras.get("github_client")
-        if gh and evidence_candidates:
-            await gh.fetch_files(ctx.snapshot, evidence_candidates, max_file_kb=40)
-
-        evidence_files = [p for p in evidence_candidates if p in ctx.snapshot.file_contents]
+        precomputed = (ctx.extras.get("llm_judgment") or {}).get("ai_usage")
+        if precomputed:
+            section = precomputed
+            conf = str(section.get("confidence", "low")).lower()
+            return MetricResult(
+                name=self.name,
+                status="ok",
+                data=self._build_data(
+                    section,
+                    verified_deps,
+                    agent_deps,
+                    evidence_files,
+                    llm_providers,
+                    diagnostics,
+                    conf,
+                ),
+            )
 
         llm: LLMClient | None = ctx.extras.get("llm_client")
         if not llm or not llm.enabled:
-            # Static-only fallback classification
-            integration = "agentic" if agent_deps else ("rag" if any(
-                AI_PACKAGES.get(d) == "vector_db" for d in ai_deps
-            ) else "wrapper")
+            integration = self._static_integration(verified_deps, agent_deps, generic_files)
             return MetricResult(
                 name=self.name,
                 status="ok",
                 data={
-                    "ai_dependencies_found": ai_deps,
+                    "ai_dependencies_found": verified_deps,
                     "ai_integration_type": integration,
                     "confidence": "low",
                     "evidence_files": evidence_files,
                     "agent_frameworks_found": agent_deps,
-                    "reasoning": "Classified from dependency names only (Vertex AI / Gemini not configured).",
+                    "llm_providers": llm_providers,
+                    "reasoning": self._static_reasoning(
+                        verified_deps, agent_deps, reconciled, generic_files
+                    ),
+                    **diagnostics,
                 },
             )
 
@@ -177,24 +170,82 @@ class AiUsageMetric(Metric):
         user = build_user_prompt(
             metrics=["ai_usage"],
             files={p: ctx.snapshot.file_contents[p] for p in evidence_files},
-            hints={"ai_dependencies_found": ai_deps, "agent_frameworks_found": agent_deps},
+            hints=hints,
             submission_context=ctx.extras.get("submission_context"),
         )
         judgment = await llm.judge_json(system=system, user=user)
         section = judgment.get("ai_usage") or judgment
-
-        min_conf = str(opts.get("min_confidence", "medium")).lower()
         conf = str(section.get("confidence", "low")).lower()
-        if CONFIDENCE_RANK.get(conf, 0) < CONFIDENCE_RANK.get(min_conf, 0):
-            # Soften overconfident claims below threshold by keeping type but noting it
-            section["confidence"] = conf
+        return MetricResult(
+            name=self.name,
+            status="ok",
+            data=self._build_data(
+                section,
+                verified_deps,
+                agent_deps,
+                evidence_files,
+                llm_providers,
+                diagnostics,
+                conf,
+            ),
+        )
 
-        data: dict[str, Any] = {
-            "ai_dependencies_found": ai_deps,
+    @staticmethod
+    def _static_integration(
+        verified_deps: list[str],
+        agent_deps: list[str],
+        generic_files: list[str],
+    ) -> str:
+        if agent_deps:
+            return "agentic"
+        if any(AI_PACKAGES.get(d) == "vector_db" for d in verified_deps):
+            return "rag"
+        if verified_deps or generic_files:
+            return "wrapper"
+        return "none"
+
+    @staticmethod
+    def _static_reasoning(
+        verified_deps: list[str],
+        agent_deps: list[str],
+        reconciled: dict[str, Any],
+        generic_files: list[str],
+    ) -> str:
+        parts = []
+        if verified_deps:
+            parts.append(f"Verified deps: {', '.join(verified_deps)}")
+        if agent_deps:
+            parts.append(f"Agent frameworks with code evidence: {', '.join(agent_deps)}")
+        rejected = reconciled.get("rejected_false_manifest_deps") or []
+        if rejected:
+            parts.append(
+                f"Ignored manifest-only agent packages without imports: {', '.join(rejected)}"
+            )
+        if generic_files:
+            parts.append(f"AI API patterns in: {', '.join(generic_files[:3])}")
+        return ". ".join(parts) or "No AI usage detected."
+
+    @staticmethod
+    def _build_data(
+        section: dict[str, Any],
+        verified_deps: list[str],
+        agent_deps: list[str],
+        evidence_files: list[str],
+        llm_providers: dict[str, Any],
+        diagnostics: dict[str, Any],
+        conf: str,
+    ) -> dict[str, Any]:
+        return {
+            "ai_dependencies_found": verified_deps,
             "ai_integration_type": section.get("ai_integration_type", "wrapper"),
-            "confidence": section.get("confidence", "low"),
+            "confidence": conf,
             "evidence_files": section.get("evidence_files") or evidence_files,
             "agent_frameworks_found": agent_deps,
+            "llm_providers": llm_providers,
             "reasoning": section.get("reasoning"),
+            **diagnostics,
         }
-        return MetricResult(name=self.name, status="ok", data=data)
+
+
+# Re-export for pipeline / tests
+__all__ = ["AiUsageMetric", "scan_manifests"]

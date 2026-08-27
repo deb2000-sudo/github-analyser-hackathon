@@ -10,8 +10,11 @@ import httpx
 
 from app.config import Settings, get_settings
 from app.gcs_cache import GcsCache
+from app.github.validation import RepoAccessInfo
 
 GITHUB_API = "https://api.github.com"
+FILE_FETCH_CONCURRENCY = 12
+SNAPSHOT_MANIFEST_LIMIT = 40
 
 
 @dataclass
@@ -39,14 +42,55 @@ class RepoSnapshot:
 
 
 def parse_github_url(url: str) -> RepoRef:
-    path = urlparse(url).path.strip("/")
+    from app.github.validation import normalize_github_repo_url
+
+    normalized = normalize_github_repo_url(url)
+    path = urlparse(normalized).path.strip("/")
     parts = [p for p in path.split("/") if p]
-    if len(parts) < 2:
-        raise ValueError(f"Cannot parse owner/repo from URL: {url}")
     owner, name = parts[0], parts[1]
-    if name.endswith(".git"):
-        name = name[:-4]
     return RepoRef(owner=owner, name=name)
+
+
+MANIFEST_NAMES = frozenset(
+    {
+        "package.json",
+        "package-lock.json",
+        "requirements.txt",
+        "pyproject.toml",
+        "Pipfile",
+        "poetry.lock",
+        "go.mod",
+        "pom.xml",
+        "build.gradle",
+        "build.gradle.kts",
+        "Cargo.toml",
+        "composer.json",
+        "Gemfile",
+        "environment.yml",
+        "conda.yml",
+        "vite.config.js",
+        "vite.config.ts",
+        "vite.config.mjs",
+        "next.config.js",
+        "next.config.mjs",
+        "next.config.ts",
+        "vercel.json",
+        "netlify.toml",
+        "angular.json",
+        "svelte.config.js",
+        "Dockerfile",
+        "docker-compose.yml",
+        "docker-compose.yaml",
+        "manage.py",
+        "server.js",
+        "server.ts",
+        "server.py",
+        "main.py",
+        "app.py",
+        "wsgi.py",
+        "asgi.py",
+    }
+)
 
 
 class GithubClient:
@@ -61,6 +105,46 @@ class GithubClient:
         if self.settings.github_token:
             headers["Authorization"] = f"Bearer {self.settings.github_token}"
         self._headers = headers
+
+    async def check_repo_access(self, github_url: str) -> RepoAccessInfo:
+        """Lightweight public-repo gate before full snapshot fetch."""
+        ref = parse_github_url(github_url)
+        async with httpx.AsyncClient(
+            headers=self._headers, timeout=30.0, follow_redirects=True
+        ) as client:
+            try:
+                repo = await self._get(client, f"/repos/{ref.owner}/{ref.name}")
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                if status == 404:
+                    return RepoAccessInfo(
+                        owner=ref.owner,
+                        name=ref.name,
+                        is_public=False,
+                        exists=False,
+                        default_branch=None,
+                        reason="repository_not_found_or_inaccessible",
+                    )
+                if status == 403:
+                    return RepoAccessInfo(
+                        owner=ref.owner,
+                        name=ref.name,
+                        is_public=False,
+                        exists=False,
+                        default_branch=None,
+                        reason="access_denied",
+                    )
+                raise
+
+            is_private = bool(repo.get("private"))
+            return RepoAccessInfo(
+                owner=ref.owner,
+                name=ref.name,
+                is_public=not is_private,
+                exists=True,
+                default_branch=repo.get("default_branch"),
+                reason="repository_is_private" if is_private else None,
+            )
 
     async def _get(self, client: httpx.AsyncClient, path: str, **params: Any) -> Any:
         resp = await client.get(
@@ -107,71 +191,39 @@ class GithubClient:
                     package_manifests=cached.get("package_manifests", {}),
                 )
 
-            tree_resp = await self._get(
-                client,
-                f"/repos/{ref.owner}/{ref.name}/git/trees/{ref.commit_sha}",
-                recursive="1",
-            )
+            tree_resp, commits, contributors = await self._fetch_repo_metadata(client, ref)
+
             tree = [t for t in tree_resp.get("tree", []) if t.get("type") == "blob"]
 
-            commits = await self._paginate(
-                client, f"/repos/{ref.owner}/{ref.name}/commits", per_page=100, max_pages=5
-            )
-            try:
-                contributors = await self._paginate(
-                    client,
-                    f"/repos/{ref.owner}/{ref.name}/contributors",
-                    per_page=100,
-                    max_pages=1,
-                )
-            except httpx.HTTPStatusError:
-                contributors = []
-
-            manifest_names = {
-                "package.json",
-                "package-lock.json",
-                "requirements.txt",
-                "pyproject.toml",
-                "Pipfile",
-                "poetry.lock",
-                "go.mod",
-                "pom.xml",
-                "build.gradle",
-                "build.gradle.kts",
-                "Cargo.toml",
-                "composer.json",
-                "Gemfile",
-                "environment.yml",
-                "conda.yml",
-            }
             paths_to_fetch = [
                 t["path"]
                 for t in tree
-                if t["path"].split("/")[-1] in manifest_names
+                if t["path"].split("/")[-1] in MANIFEST_NAMES
                 or any(
                     t["path"].endswith(s)
-                    for s in ("/App.tsx", "/App.jsx", "/App.js", "/App.ts", "/main.py", "/index.html")
+                    for s in (
+                        "/App.tsx",
+                        "/App.jsx",
+                        "/App.js",
+                        "/App.ts",
+                        "/main.py",
+                        "/index.html",
+                        "/src/main.tsx",
+                        "/src/main.jsx",
+                    )
                 )
             ]
             if extra_paths:
                 paths_to_fetch.extend(extra_paths)
-            seen: set[str] = set()
-            unique_paths: list[str] = []
-            for p in paths_to_fetch:
-                if p not in seen:
-                    seen.add(p)
-                    unique_paths.append(p)
+            unique_paths = list(dict.fromkeys(paths_to_fetch))[:SNAPSHOT_MANIFEST_LIMIT]
 
-            file_contents: dict[str, str] = {}
-            package_manifests: dict[str, str] = {}
             max_bytes = max_file_kb * 1024
-            for path in unique_paths[:80]:
-                content = await self._get_raw_file(client, ref, path, max_bytes=max_bytes)
-                if content is None:
-                    continue
-                file_contents[path] = content
-                if path.split("/")[-1] in manifest_names:
-                    package_manifests[path] = content
+            file_contents = await self._fetch_files_parallel(
+                client, ref, unique_paths, max_bytes=max_bytes
+            )
+            package_manifests = {
+                p: c for p, c in file_contents.items() if p.split("/")[-1] in MANIFEST_NAMES
+            }
 
             snapshot = RepoSnapshot(
                 ref=ref,
@@ -193,14 +245,53 @@ class GithubClient:
             )
             return snapshot
 
+    async def _fetch_repo_metadata(
+        self,
+        client: httpx.AsyncClient,
+        ref: RepoRef,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+        """Tree + recent commits + contributors in parallel (not sequential)."""
+        tree_coro = self._get(
+            client,
+            f"/repos/{ref.owner}/{ref.name}/git/trees/{ref.commit_sha}",
+            recursive="1",
+        )
+        commits_coro = self._paginate(
+            client,
+            f"/repos/{ref.owner}/{ref.name}/commits",
+            per_page=100,
+            max_pages=2,
+        )
+        contributors_coro = self._paginate(
+            client,
+            f"/repos/{ref.owner}/{ref.name}/contributors",
+            per_page=100,
+            max_pages=1,
+        )
+
+        tree_resp, commits, contributors = await asyncio.gather(
+            tree_coro,
+            commits_coro,
+            contributors_coro,
+            return_exceptions=True,
+        )
+        if isinstance(tree_resp, BaseException):
+            raise tree_resp
+        if isinstance(commits, BaseException):
+            commits = []
+        if isinstance(contributors, BaseException):
+            contributors = []
+        return tree_resp, commits, contributors
+
     async def fetch_files(
         self,
         snapshot: RepoSnapshot,
         paths: list[str],
         *,
         max_file_kb: int = 40,
+        max_files: int = 60,
     ) -> dict[str, str]:
-        missing = [p for p in paths if p not in snapshot.file_contents]
+        missing = [p for p in paths if p not in snapshot.file_contents][:max_files]
         if not missing:
             return {p: snapshot.file_contents[p] for p in paths if p in snapshot.file_contents}
 
@@ -208,11 +299,34 @@ class GithubClient:
             headers=self._headers, timeout=60.0, follow_redirects=True
         ) as client:
             max_bytes = max_file_kb * 1024
-            for path in missing[:40]:
-                content = await self._get_raw_file(client, snapshot.ref, path, max_bytes=max_bytes)
-                if content is not None:
-                    snapshot.file_contents[path] = content
+            fetched = await self._fetch_files_parallel(
+                client, snapshot.ref, missing, max_bytes=max_bytes
+            )
+            snapshot.file_contents.update(fetched)
         return {p: snapshot.file_contents[p] for p in paths if p in snapshot.file_contents}
+
+    async def _fetch_files_parallel(
+        self,
+        client: httpx.AsyncClient,
+        ref: RepoRef,
+        paths: list[str],
+        *,
+        max_bytes: int,
+        concurrency: int = FILE_FETCH_CONCURRENCY,
+    ) -> dict[str, str]:
+        if not paths:
+            return {}
+        sem = asyncio.Semaphore(concurrency)
+        out: dict[str, str] = {}
+
+        async def fetch_one(path: str) -> None:
+            async with sem:
+                content = await self._get_raw_file(client, ref, path, max_bytes=max_bytes)
+                if content is not None:
+                    out[path] = content
+
+        await asyncio.gather(*(fetch_one(p) for p in paths))
+        return out
 
     async def _get_raw_file(
         self,
@@ -236,7 +350,7 @@ class GithubClient:
         path: str,
         *,
         per_page: int = 100,
-        max_pages: int = 5,
+        max_pages: int = 2,
     ) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
         for page in range(1, max_pages + 1):

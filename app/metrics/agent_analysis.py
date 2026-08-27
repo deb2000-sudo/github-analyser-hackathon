@@ -5,6 +5,7 @@ from typing import Any
 from app.github.client import PATH_HINTS, paths_matching
 from app.llm.client import LLMClient
 from app.metrics.ai_usage import scan_manifests
+from app.metrics.solution_fit import _curate_paths
 from app.metrics.base import Metric, MetricContext, MetricResult
 from app.pipeline.prompt import build_system_prompt, build_user_prompt
 
@@ -13,11 +14,11 @@ class AgentAnalysisMetric(Metric):
     name = "agent_analysis"
     tier = "llm"
     description = (
-        "LLM analysis of agent/orchestration files. Auto-skips when no agent frameworks found."
+        "LLM analysis of agent/orchestration patterns in the repo. Always runs when LLM is enabled."
     )
     depends_on = ["ai_usage"]
-    default_options = {"max_agent_files_kb": 40, "max_files": 15}
-    skippable_when = "no agent-framework dependencies found"
+    default_options = {"max_agent_files_kb": 40, "max_files": 10}
+    skippable_when = "LLM unavailable or no readable source files"
     output_schema = {
         "type": "object",
         "properties": {
@@ -51,21 +52,6 @@ class AgentAnalysisMetric(Metric):
             ai_deps, _ = scan_manifests(ctx.snapshot.package_manifests)
             ctx.extras.setdefault("ai_dependencies_found", ai_deps)
 
-        if not agent_deps:
-            return MetricResult(
-                name=self.name,
-                status="skipped",
-                data={
-                    "status": "skipped",
-                    "agent_count": 0,
-                    "agents": [],
-                    "has_real_orchestration": False,
-                    "confidence": "high",
-                    "reasoning": "No agent-framework dependencies found; skipped LLM agent analysis.",
-                },
-                reason="no_agent_framework_deps",
-            )
-
         llm: LLMClient | None = ctx.extras.get("llm_client")
         if not llm or not llm.enabled:
             return MetricResult(
@@ -83,7 +69,6 @@ class AgentAnalysisMetric(Metric):
             )
 
         candidates = paths_matching(ctx.snapshot.tree, PATH_HINTS)
-        # Prefer source files
         candidates = [
             p
             for p in candidates
@@ -91,6 +76,8 @@ class AgentAnalysisMetric(Metric):
             and "node_modules" not in p
             and ".venv" not in p
         ][: int(opts.get("max_files", 15))]
+        if not candidates:
+            candidates = _curate_paths(ctx.snapshot.tree, max_files=int(opts.get("max_files", 15)))
 
         if not candidates:
             return MetricResult(
@@ -102,14 +89,14 @@ class AgentAnalysisMetric(Metric):
                     "agents": [],
                     "has_real_orchestration": False,
                     "confidence": "medium",
-                    "reasoning": "Agent frameworks declared but no agent-related source files found.",
+                    "reasoning": "No agent-related or entry source files found.",
                 },
                 reason="no_agent_files",
             )
 
         gh = ctx.extras.get("github_client")
         max_kb = int(opts.get("max_agent_files_kb", 40))
-        if gh:
+        if gh and not ctx.extras.get("skip_file_fetch"):
             await gh.fetch_files(ctx.snapshot, candidates, max_file_kb=max_kb)
 
         files = {p: ctx.snapshot.file_contents[p] for p in candidates if p in ctx.snapshot.file_contents}
@@ -128,12 +115,28 @@ class AgentAnalysisMetric(Metric):
                 reason="fetch_failed",
             )
 
+        precomputed = (ctx.extras.get("llm_judgment") or {}).get("agent_analysis")
+        if precomputed:
+            section = precomputed
+            return MetricResult(
+                name=self.name,
+                status="ok",
+                data={
+                    "agent_count": int(section.get("agent_count") or len(section.get("agents") or [])),
+                    "agents": section.get("agents") or [],
+                    "has_real_orchestration": bool(section.get("has_real_orchestration", False)),
+                    "confidence": section.get("confidence", "low"),
+                    "reasoning": section.get("reasoning"),
+                    "status": "ok",
+                },
+            )
+
         system = build_system_prompt(["agent_analysis"])
         user = build_user_prompt(
             metrics=["agent_analysis"],
             files=files,
             hints={
-                "agent_frameworks_found": agent_deps,
+                "agent_frameworks_found": agent_deps or [],
                 "ai_dependencies_found": ctx.extras.get("ai_dependencies_found", []),
             },
             submission_context=ctx.extras.get("submission_context"),

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import firebase_admin
@@ -12,7 +11,7 @@ _app: firebase_admin.App | None = None
 
 
 def init_firebase() -> firebase_admin.App:
-    """Initialize Firebase Admin once (Firestore via ADC or explicit SA JSON)."""
+    """Initialize Firebase Admin once (SA from .env locally, ADC on Cloud Run)."""
     global _app
     if _app is not None:
         return _app
@@ -22,20 +21,21 @@ def init_firebase() -> firebase_admin.App:
 
     settings = get_settings()
     options: dict[str, Any] = {}
-    if settings.gcp_project_id:
-        options["projectId"] = settings.gcp_project_id
+    project_id = settings.resolved_project_id
+    if project_id:
+        options["projectId"] = project_id
+    if settings.firebase_database_url:
+        options["databaseURL"] = settings.firebase_database_url
 
-    if settings.firebase_credentials_json:
-        info = json.loads(settings.firebase_credentials_json)
+    info = settings.service_account_info()
+    if info:
         cred = credentials.Certificate(info)
         _app = firebase_admin.initialize_app(cred, options or None)
     else:
-        # Application Default Credentials (Cloud Run / gcloud ADC)
         try:
             cred = credentials.ApplicationDefault()
             _app = firebase_admin.initialize_app(cred, options or None)
         except Exception:
-            # Last resort: initialize without explicit cred (uses env project)
             _app = firebase_admin.initialize_app(options=options or None)
     return _app
 

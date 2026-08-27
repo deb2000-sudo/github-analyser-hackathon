@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+import json
 
 from app.github.client import RepoRef, RepoSnapshot
 from app.metrics.ai_usage import AiUsageMetric, scan_manifests
@@ -21,8 +22,39 @@ def test_scan_manifests_finds_ai_and_agent_deps():
     ai, agents = scan_manifests(manifests)
     assert "openai" in ai
     assert "langchain" in ai
-    assert "langchain" in agents
-    assert "@langchain/core" in agents or "langchain" in agents
+    assert "@langchain/core" in ai
+
+
+def test_scan_manifests_no_false_positive_scoped_core():
+    """@babel/core must not match @langchain/core via basename fuzzy matching."""
+    manifests = {
+        "package.json": '{"dependencies":{"@babel/core":"7.0.0","react":"18.0.0"}}',
+    }
+    ai, agents = scan_manifests(manifests)
+    assert ai == []
+    assert agents == []
+
+
+def test_agent_framework_requires_code_import():
+    from app.metrics.ai_imports import reconcile_ai_dependencies
+
+    reconciled = reconcile_ai_dependencies(
+        ["@langchain/core"],
+        {},
+    )
+    assert reconciled["ai_dependencies_found"] == []
+    assert "@langchain/core" in reconciled["rejected_false_manifest_deps"]
+
+
+def test_agent_framework_verified_with_import():
+    from app.metrics.ai_imports import reconcile_ai_dependencies
+
+    reconciled = reconcile_ai_dependencies(
+        ["langchain"],
+        {"langchain": ["backend/agent.py"]},
+    )
+    assert "langchain" in reconciled["ai_dependencies_found"]
+    assert "langchain" in reconciled["agent_frameworks_found"]
 
 
 def test_fullstack_detects_react_fastapi():
@@ -44,8 +76,94 @@ def test_fullstack_detects_react_fastapi():
     result = asyncio.run(FullstackMetric().run(MetricContext(snapshot=snapshot)))
     assert result.status == "ok"
     assert result.data["is_fullstack"] is True
+    assert result.data["repo_type"] == "fullstack"
     assert result.data["frontend_detected"]["stack_guess"] == "React"
     assert result.data["backend_detected"]["stack_guess"] == "FastAPI"
+
+
+def test_fullstack_vite_react_with_src_api_is_frontend_only():
+    """Folder names like src/api must not be treated as a server."""
+    tree = [
+        {"path": "package.json", "type": "blob"},
+        {"path": "index.html", "type": "blob"},
+        {"path": "vite.config.js", "type": "blob"},
+        {"path": "vercel.json", "type": "blob"},
+        {"path": "src/App.jsx", "type": "blob"},
+        {"path": "src/main.jsx", "type": "blob"},
+        {"path": "src/api/client.js", "type": "blob"},
+        {"path": "src/api/hackathon.js", "type": "blob"},
+        {"path": "public/favicon.ico", "type": "blob"},
+    ]
+    snapshot = RepoSnapshot(
+        ref=RepoRef("o", "hackniat"),
+        tree=tree,
+        package_manifests={
+            "package.json": json.dumps(
+                {
+                    "dependencies": {"react": "18.3.0", "react-dom": "18.3.0"},
+                    "devDependencies": {"vite": "5.4.0", "@vitejs/plugin-react": "4.3.0"},
+                }
+            )
+        },
+        file_contents={
+            "vite.config.js": "import { defineConfig } from 'vite'\nexport default defineConfig({})",
+            "src/api/client.js": "export async function getMe() { return fetch('/api/me') }\n",
+            "index.html": "<div id='root'></div>",
+        },
+    )
+    result = asyncio.run(FullstackMetric().run(MetricContext(snapshot=snapshot)))
+    assert result.data["frontend_detected"]["present"] is True
+    assert result.data["frontend_detected"]["stack_guess"] == "React"
+    assert result.data["backend_detected"]["present"] is False
+    assert result.data["backend_detected"]["stack_guess"] is None
+    assert result.data["is_fullstack"] is False
+    assert result.data["repo_type"] == "frontend"
+
+
+def test_fullstack_express_plus_react_is_fullstack():
+    tree = [
+        {"path": "package.json", "type": "blob"},
+        {"path": "index.html", "type": "blob"},
+        {"path": "src/App.jsx", "type": "blob"},
+        {"path": "server.js", "type": "blob"},
+    ]
+    snapshot = RepoSnapshot(
+        ref=RepoRef("o", "r"),
+        tree=tree,
+        package_manifests={
+            "package.json": json.dumps(
+                {"dependencies": {"react": "18.0.0", "express": "4.19.0"}}
+            )
+        },
+        file_contents={
+            "server.js": "const express = require('express');\nconst app = express();\napp.listen(3000);\n",
+        },
+    )
+    result = asyncio.run(FullstackMetric().run(MetricContext(snapshot=snapshot)))
+    assert result.data["is_fullstack"] is True
+    assert result.data["repo_type"] == "fullstack"
+    assert result.data["backend_detected"]["stack_guess"] == "Express"
+
+
+def test_fullstack_next_api_route_counts_as_backend():
+    tree = [
+        {"path": "package.json", "type": "blob"},
+        {"path": "next.config.js", "type": "blob"},
+        {"path": "app/page.tsx", "type": "blob"},
+        {"path": "app/api/hello/route.ts", "type": "blob"},
+    ]
+    snapshot = RepoSnapshot(
+        ref=RepoRef("o", "r"),
+        tree=tree,
+        package_manifests={"package.json": json.dumps({"dependencies": {"next": "14.0.0", "react": "18.0.0"}})},
+        file_contents={
+            "app/api/hello/route.ts": "export async function GET() { return Response.json({ ok: true }) }\n",
+        },
+    )
+    result = asyncio.run(FullstackMetric().run(MetricContext(snapshot=snapshot)))
+    assert result.data["frontend_detected"]["present"] is True
+    assert result.data["backend_detected"]["present"] is True
+    assert result.data["repo_type"] == "fullstack"
 
 
 def test_repo_health_flags_dump():
@@ -95,13 +213,15 @@ def test_user_prompt_includes_submission_context():
         metrics=["solution_fit"],
         files={"README.md": "# demo"},
         submission_context={
-            "problem_statement": "Build a study planner agent",
-            "solution_description": "LangGraph multi-agent",
+            "provided_context": (
+                "This project is a multi-agent LangGraph study planner that helps students "
+                "build personalized study schedules using RAG over course materials."
+            ),
             "rubrics": ["Uses LLM"],
         },
     )
-    assert "Build a study planner agent" in user
-    assert "LangGraph multi-agent" in user
+    assert "LangGraph study planner" in user
+    assert "RAG over course materials" in user
     assert "Uses LLM" in user
 
 

@@ -13,8 +13,8 @@ from app.metrics.registry import init_registry
 async def lifespan(_app: FastAPI):
     init_registry()
     settings = get_settings()
-    # Firebase optional at import-time for unit tests; init when project is configured
-    if settings.gcp_project_id:
+    # Firebase optional at import-time for unit tests; init when project/SA is configured
+    if settings.resolved_project_id or settings.service_account_info():
         try:
             init_firebase()
         except Exception:

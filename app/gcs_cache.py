@@ -17,7 +17,10 @@ class GcsCache:
         self.settings = settings or get_settings()
         self._client: storage.Client | None = None
         if self.settings.gcs_enabled:
-            self._client = storage.Client(project=self.settings.gcp_project_id)
+            self._client = storage.Client(
+                project=self.settings.resolved_project_id,
+                credentials=self.settings.google_credentials(),
+            )
 
     @property
     def enabled(self) -> bool:
