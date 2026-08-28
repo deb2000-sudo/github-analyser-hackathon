@@ -19,8 +19,9 @@ substitutions:
   _GCS_CACHE_PREFIX: github-cache
   _GITHUB_CACHE_TTL: '86400'
   _FIRESTORE_COLLECTION: github_analysis_jobs
-  # Cloud Run runtime SA (must have Secret Manager + Vertex + Firestore + GCS access)
-  _RUN_SERVICE_ACCOUNT: nxt-acad-ai-hackathon-evaluator@nxt-create-deb.iam.gserviceaccount.com
+  # Cloud Run runtime SA — same project as this Cloud Build (must have Secret Manager access).
+  # Do not use nxt-acad-ai-hackathon-evaluator@nxt-create-deb (different project → actAs denied).
+  _RUN_SERVICE_ACCOUNT: nxt-acad-ai-hackathon-evaluate@nxt-acad-hackathon.iam.gserviceaccount.com
 
 steps:
   # Step 1: Ensure Artifact Registry repository exists (required before first push)

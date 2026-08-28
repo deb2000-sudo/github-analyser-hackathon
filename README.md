@@ -129,7 +129,7 @@ gcloud builds submit --config cloudbuild.yaml \
 | `_GEMINI_MODEL` | `gemini-2.5-flash` | Vertex Gemini model |
 | `_GCS_CACHE_PREFIX` | `github-cache` | GCS object prefix |
 | `_FIRESTORE_COLLECTION` | `github_analysis_jobs` | Firestore jobs collection |
-| `_RUN_SERVICE_ACCOUNT` | `nxt-acad-ai-hackathon-evaluator@nxt-create-deb.iam.gserviceaccount.com` | Cloud Run runtime SA |
+| `_RUN_SERVICE_ACCOUNT` | `nxt-acad-ai-hackathon-evaluate@nxt-acad-hackathon.iam.gserviceaccount.com` | Cloud Run runtime SA |
 
 **Notes:**
 - Cloud Run uses `_RUN_SERVICE_ACCOUNT` (not the default compute SA) so Secret Manager, Vertex, Firestore, and GCS permissions apply.
@@ -143,7 +143,7 @@ gcloud builds submit --config cloudbuild.yaml \
 gcloud run deploy github-analyser \
   --source . \
   --region us-central1 \
-  --service-account nxt-acad-ai-hackathon-evaluator@nxt-create-deb.iam.gserviceaccount.com \
+  --service-account nxt-acad-ai-hackathon-evaluate@nxt-acad-hackathon.iam.gserviceaccount.com \
   --allow-unauthenticated \
   --set-env-vars "GOOGLE_CLOUD_PROJECT=nxt-acad-hackathon,GOOGLE_CLOUD_LOCATION=us-central1,EVALUATION_BUCKET_NAME=nxt-acad-hackathon-hackathon-evaluations,GEMINI_MODEL=gemini-2.5-flash,FIRESTORE_COLLECTION_JOBS=github_analysis_jobs" \
   --set-secrets "GITHUB_TOKEN=GITHUB_TOKEN:latest,FIREBASE_PROJECT_ID=FIREBASE_PROJECT_ID:latest,FIREBASE_PRIVATE_KEY=FIREBASE_PRIVATE_KEY:latest,FIREBASE_CLIENT_EMAIL=FIREBASE_CLIENT_EMAIL:latest,FIREBASE_DATABASE_URL=FIREBASE_DATABASE_URL:latest,FIREBASE_WEB_API_KEY=FIREBASE_WEB_API_KEY:latest" \
