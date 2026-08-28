@@ -19,6 +19,8 @@ substitutions:
   _GCS_CACHE_PREFIX: github-cache
   _GITHUB_CACHE_TTL: '86400'
   _FIRESTORE_COLLECTION: github_analysis_jobs
+  # Cloud Run runtime SA (must have Secret Manager + Vertex + Firestore + GCS access)
+  _RUN_SERVICE_ACCOUNT: nxt-acad-ai-hackathon-evaluator@nxt-create-deb.iam.gserviceaccount.com
 
 steps:
   # Step 1: Ensure Artifact Registry repository exists (required before first push)
@@ -93,6 +95,7 @@ steps:
           --image="$$IMAGE" \
           --region=${_REGION} \
           --platform=managed \
+          --service-account=${_RUN_SERVICE_ACCOUNT} \
           --allow-unauthenticated \
           --port=8080 \
           --memory=1Gi \
@@ -107,18 +110,7 @@ steps:
 
         SERVICE_URL=$$(gcloud run services describe github-analyser \
           --region=${_REGION} --project=$PROJECT_ID --format='value(status.url)')
-        echo "Deployed: $$SERVICE_URL"
-
-        # Runtime SA — Vertex AI, Firestore, GCS cache
-        PROJECT_NUMBER=$$(gcloud projects describe $PROJECT_ID --format='value(projectNumber)')
-        RUNTIME_SA=$${PROJECT_NUMBER}-compute@developer.gserviceaccount.com
-        for ROLE in roles/aiplatform.user roles/datastore.user roles/storage.objectAdmin roles/secretmanager.secretAccessor; do
-          gcloud projects add-iam-policy-binding $PROJECT_ID \
-            --member="serviceAccount:$${RUNTIME_SA}" \
-            --role="$$ROLE" \
-            --condition=None \
-            --quiet || true
-        done
+        echo "Deployed: $$SERVICE_URL (runtime SA: ${_RUN_SERVICE_ACCOUNT})"
     env:
       - CLOUDSDK_COMPUTE_REGION=${_REGION}
 
@@ -133,4 +125,5 @@ options:
 
 timeout: 1800s
 
-# Cloud Build SA: roles/run.admin, roles/artifactregistry.writer, roles/iam.serviceAccountUser
+# Cloud Build SA: roles/run.admin, roles/artifactregistry.writer,
+# roles/iam.serviceAccountUser on ${_RUN_SERVICE_ACCOUNT}
