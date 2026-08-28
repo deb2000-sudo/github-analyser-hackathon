@@ -1,40 +1,27 @@
 # Deploy github-analyser to Cloud Run via Cloud Build.
 #
-# One-time: create secrets in Secret Manager (values from your local .env).
-# Secret ids must match the substitutions below (override via --substitutions if needed).
+# Secrets (already in GCP Secret Manager — same id as env var name):
+#   FIREBASE_PROJECT_ID, FIREBASE_PRIVATE_KEY, FIREBASE_CLIENT_EMAIL,
+#   FIREBASE_DATABASE_URL, FIREBASE_WEB_API_KEY, GITHUB_TOKEN
 #
-#   gcloud secrets create firebase-project-id --replication-policy=automatic --project=$PROJECT_ID
-#   echo -n 'YOUR_VALUE' | gcloud secrets versions add firebase-project-id --data-file=- --project=$PROJECT_ID
-#   # repeat for: firebase-private-key-id, firebase-private-key, firebase-client-email,
-#   #   firebase-client-id, firebase-database-url, firebase-web-api-key, github-token
+# Vertex AI + GCS settings are plain env vars below (not secrets).
 #
 # Deploy:
-#   export PROJECT_ID=nxt-acad-hackathon
-#   export REGION=us-central1
-#   export BUCKET=nxt-acad-hackathon-hackathon-evaluations
-#   gcloud builds submit --config cloudbuild.yaml \
-#     --substitutions=_REGION=${REGION},_GCS_BUCKET=${BUCKET} \
-#     --project=${PROJECT_ID}
-#
-# This file mounts all Firebase + GITHUB_TOKEN env vars from Secret Manager on Cloud Run.
-# Non-secret config is set via --set-env-vars in the deploy step.
+#   gcloud builds submit --config cloudbuild.yaml --project=nxt-acad-hackathon
 
 substitutions:
   _REGION: us-central1
   _SERVICE: github-analyser
   _AR_REPO: cloud-run-source-deploy
-  _GCS_BUCKET: ""
-  _VERTEX_MODEL: gemini-2.5-flash
   _RUN_SERVICE_ACCOUNT: ""
-  _MOUNT_SECRETS: "true"
-  _GITHUB_TOKEN_SECRET: github-token
-  _SEC_FIREBASE_PROJECT_ID: firebase-project-id
-  _SEC_FIREBASE_PRIVATE_KEY_ID: firebase-private-key-id
-  _SEC_FIREBASE_PRIVATE_KEY: firebase-private-key
-  _SEC_FIREBASE_CLIENT_EMAIL: firebase-client-email
-  _SEC_FIREBASE_CLIENT_ID: firebase-client-id
-  _SEC_FIREBASE_DATABASE_URL: firebase-database-url
-  _SEC_FIREBASE_WEB_API_KEY: firebase-web-api-key
+  # Vertex AI + GCS (non-secret — edit here if needed)
+  _GCP_PROJECT: nxt-acad-hackathon
+  _GCP_LOCATION: us-central1
+  _GCS_BUCKET: nxt-acad-hackathon-hackathon-evaluations
+  _GEMINI_MODEL: gemini-2.5-flash
+  _GCS_CACHE_PREFIX: github-cache
+  _GITHUB_CACHE_TTL: "86400"
+  _FIRESTORE_COLLECTION: github_analysis_jobs
 
 steps:
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk
@@ -77,11 +64,6 @@ steps:
       - -c
       - |
         set -euo pipefail
-        if [[ "${_MOUNT_SECRETS}" != "true" ]]; then
-          echo "Skipping secret IAM (_MOUNT_SECRETS=false)"
-          exit 0
-        fi
-
         if [[ -n "${_RUN_SERVICE_ACCOUNT}" ]]; then
           RUN_SA="${_RUN_SERVICE_ACCOUNT}"
         else
@@ -90,20 +72,14 @@ steps:
         fi
 
         for SECRET_ID in \
-          "${_GITHUB_TOKEN_SECRET}" \
-          "${_SEC_FIREBASE_PROJECT_ID}" \
-          "${_SEC_FIREBASE_PRIVATE_KEY_ID}" \
-          "${_SEC_FIREBASE_PRIVATE_KEY}" \
-          "${_SEC_FIREBASE_CLIENT_EMAIL}" \
-          "${_SEC_FIREBASE_CLIENT_ID}" \
-          "${_SEC_FIREBASE_DATABASE_URL}" \
-          "${_SEC_FIREBASE_WEB_API_KEY}"; do
-          if [[ -z "$${SECRET_ID}" ]]; then
-            continue
-          fi
+          GITHUB_TOKEN \
+          FIREBASE_PROJECT_ID \
+          FIREBASE_PRIVATE_KEY \
+          FIREBASE_CLIENT_EMAIL \
+          FIREBASE_DATABASE_URL \
+          FIREBASE_WEB_API_KEY; do
           if ! gcloud secrets describe "$${SECRET_ID}" --project="$PROJECT_ID" >/dev/null 2>&1; then
             echo "ERROR: Secret '$${SECRET_ID}' not found in project $PROJECT_ID" >&2
-            echo "Create it once (see cloudbuild.yaml header), then re-run deploy." >&2
             exit 1
           fi
           gcloud secrets add-iam-policy-binding "$${SECRET_ID}" \
@@ -123,14 +99,22 @@ steps:
         set -euo pipefail
         IMAGE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$BUILD_ID"
 
-        ENV_VARS="GOOGLE_CLOUD_PROJECT=$PROJECT_ID"
-        ENV_VARS="$${ENV_VARS},GOOGLE_CLOUD_LOCATION=${_REGION}"
+        ENV_VARS="GOOGLE_CLOUD_PROJECT=${_GCP_PROJECT}"
+        ENV_VARS="$${ENV_VARS},GOOGLE_CLOUD_LOCATION=${_GCP_LOCATION}"
         ENV_VARS="$${ENV_VARS},EVALUATION_BUCKET_NAME=${_GCS_BUCKET}"
-        ENV_VARS="$${ENV_VARS},GEMINI_MODEL=${_VERTEX_MODEL}"
+        ENV_VARS="$${ENV_VARS},GEMINI_MODEL=${_GEMINI_MODEL}"
         ENV_VARS="$${ENV_VARS},VERTEX_ENABLED=true"
-        ENV_VARS="$${ENV_VARS},FIRESTORE_COLLECTION_JOBS=githubanalysis_jobs"
-        ENV_VARS="$${ENV_VARS},GCS_CACHE_PREFIX=github-cache"
+        ENV_VARS="$${ENV_VARS},GCS_CACHE_PREFIX=${_GCS_CACHE_PREFIX}"
+        ENV_VARS="$${ENV_VARS},GITHUB_CACHE_TTL_SECONDS=${_GITHUB_CACHE_TTL}"
+        ENV_VARS="$${ENV_VARS},FIRESTORE_COLLECTION_JOBS=${_FIRESTORE_COLLECTION}"
         ENV_VARS="$${ENV_VARS},HOST=0.0.0.0"
+
+        SECRETS="GITHUB_TOKEN=GITHUB_TOKEN:latest"
+        SECRETS="$${SECRETS},FIREBASE_PROJECT_ID=FIREBASE_PROJECT_ID:latest"
+        SECRETS="$${SECRETS},FIREBASE_PRIVATE_KEY=FIREBASE_PRIVATE_KEY:latest"
+        SECRETS="$${SECRETS},FIREBASE_CLIENT_EMAIL=FIREBASE_CLIENT_EMAIL:latest"
+        SECRETS="$${SECRETS},FIREBASE_DATABASE_URL=FIREBASE_DATABASE_URL:latest"
+        SECRETS="$${SECRETS},FIREBASE_WEB_API_KEY=FIREBASE_WEB_API_KEY:latest"
 
         DEPLOY_ARGS=(
           run deploy "${_SERVICE}"
@@ -146,36 +130,12 @@ steps:
           --min-instances=0
           --max-instances=10
           --set-env-vars="$${ENV_VARS}"
+          --set-secrets="$${SECRETS}"
           --project="$PROJECT_ID"
         )
 
         if [[ -n "${_RUN_SERVICE_ACCOUNT}" ]]; then
           DEPLOY_ARGS+=(--service-account="${_RUN_SERVICE_ACCOUNT}")
-        fi
-
-        if [[ "${_MOUNT_SECRETS}" == "true" ]]; then
-          SECRETS=""
-          add_secret() {
-            local env_name="$${1}"
-            local secret_id="$${2}"
-            if [[ -n "$${secret_id}" ]]; then
-              if [[ -n "$${SECRETS}" ]]; then
-                SECRETS="$${SECRETS},"
-              fi
-              SECRETS="$${SECRETS}$${env_name}=$${secret_id}:latest"
-            fi
-          }
-          add_secret GITHUB_TOKEN "${_GITHUB_TOKEN_SECRET}"
-          add_secret FIREBASE_PROJECT_ID "${_SEC_FIREBASE_PROJECT_ID}"
-          add_secret FIREBASE_PRIVATE_KEY_ID "${_SEC_FIREBASE_PRIVATE_KEY_ID}"
-          add_secret FIREBASE_PRIVATE_KEY "${_SEC_FIREBASE_PRIVATE_KEY}"
-          add_secret FIREBASE_CLIENT_EMAIL "${_SEC_FIREBASE_CLIENT_EMAIL}"
-          add_secret FIREBASE_CLIENT_ID "${_SEC_FIREBASE_CLIENT_ID}"
-          add_secret FIREBASE_DATABASE_URL "${_SEC_FIREBASE_DATABASE_URL}"
-          add_secret FIREBASE_WEB_API_KEY "${_SEC_FIREBASE_WEB_API_KEY}"
-          if [[ -n "$${SECRETS}" ]]; then
-            DEPLOY_ARGS+=(--set-secrets="$${SECRETS}")
-          fi
         fi
 
         gcloud "$${DEPLOY_ARGS[@]}"
@@ -192,5 +152,5 @@ images:
 options:
   logging: CLOUD_LOGGING_ONLY
 
-# Cloud Build SA needs: roles/run.admin, roles/artifactregistry.writer,
-# roles/iam.serviceAccountUser, roles/secretmanager.admin (for ensure-secret-access step).
+# Cloud Build SA: roles/run.admin, roles/artifactregistry.writer,
+# roles/iam.serviceAccountUser, roles/secretmanager.admin

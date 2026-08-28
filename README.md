@@ -88,11 +88,6 @@ gcloud firestore databases create --location="$REGION" --project="$PROJECT_ID" 2
 # GCS cache bucket
 gsutil mb -l "$REGION" "gs://${BUCKET}" 2>/dev/null || true
 
-# Create Secret Manager secrets once (values from your .env) — see cloudbuild.yaml header
-# Secret ids: firebase-project-id, firebase-private-key-id, firebase-private-key,
-#   firebase-client-email, firebase-client-id, firebase-database-url,
-#   firebase-web-api-key, github-token
-
 PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')
 RUN_SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
 
@@ -110,49 +105,53 @@ for ROLE in roles/run.admin roles/artifactregistry.writer roles/iam.serviceAccou
 done
 ```
 
-Firebase and `GITHUB_TOKEN` are mounted from Secret Manager by `cloudbuild.yaml` (not plain env vars). See substitutions `_SEC_FIREBASE_*` and `_GITHUB_TOKEN_SECRET` in that file.
+**Secrets** (already in Secret Manager): `FIREBASE_PROJECT_ID`, `FIREBASE_PRIVATE_KEY`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_DATABASE_URL`, `FIREBASE_WEB_API_KEY`, `GITHUB_TOKEN`.
+
+**Plain env vars** (set in `cloudbuild.yaml` substitutions): Vertex AI + GCS — `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `EVALUATION_BUCKET_NAME`, `GEMINI_MODEL`, etc.
 
 ### 2. Deploy with Cloud Build
 
 ```bash
-gcloud builds submit --config cloudbuild.yaml \
-  --substitutions=_REGION=${REGION},_GCS_BUCKET=${BUCKET} \
-  --project="$PROJECT_ID"
+gcloud builds submit --config cloudbuild.yaml --project=nxt-acad-hackathon
 ```
 
-The final deploy step prints the **Cloud Run URL**.
+The final deploy step prints the **Cloud Run URL**. Vertex AI + GCS settings are baked into `cloudbuild.yaml` substitutions; override only if needed:
+
+```bash
+gcloud builds submit --config cloudbuild.yaml \
+  --substitutions=_GCS_BUCKET=my-other-bucket,_GEMINI_MODEL=gemini-2.0-flash \
+  --project=nxt-acad-hackathon
+```
 
 **Substitutions** (optional overrides):
 
 | Var | Default | Purpose |
 |---|---|---|
 | `_REGION` | `us-central1` | Cloud Run + Vertex region |
-| `_GCS_BUCKET` | *(required)* | `EVALUATION_BUCKET_NAME` |
-| `_SERVICE` | `github-analyser` | Cloud Run service name |
-| `_VERTEX_MODEL` | `gemini-2.5-flash` | Gemini model |
-| `_GITHUB_TOKEN_SECRET` | `github-token` | Secret id for `GITHUB_TOKEN` |
-| `_SEC_FIREBASE_*` | see table above | Firebase secret ids |
-| `_MOUNT_SECRETS` | `true` | Set `false` to skip all secrets (ADC only) |
+| `_GCP_PROJECT` | `nxt-acad-hackathon` | `GOOGLE_CLOUD_PROJECT` |
+| `_GCP_LOCATION` | `us-central1` | `GOOGLE_CLOUD_LOCATION` |
+| `_GCS_BUCKET` | `nxt-acad-hackathon-hackathon-evaluations` | GCS cache bucket |
+| `_GEMINI_MODEL` | `gemini-2.5-flash` | Vertex Gemini model |
+| `_GCS_CACHE_PREFIX` | `github-cache` | GCS object prefix |
+| `_FIRESTORE_COLLECTION` | `github_analysis_jobs` | Firestore jobs collection |
 | `_RUN_SERVICE_ACCOUNT` | *(empty)* | Custom runtime SA email |
 
 **Notes:**
-- All Firebase + `GITHUB_TOKEN` env vars come from Secret Manager via `cloudbuild.yaml`.
+- Firebase + `GITHUB_TOKEN` come from your existing Secret Manager secrets (same names as env vars).
 - Vertex AI uses the **Cloud Run runtime SA** (ADC), not the Firebase Admin key.
-- Create secrets once before first deploy (instructions in `cloudbuild.yaml` header).
-- Image tag uses `$BUILD_ID` (works with `gcloud builds submit` and Git triggers).
 
 ### Manual deploy (alternative)
 
 ```bash
 gcloud run deploy github-analyser \
   --source . \
-  --region "$REGION" \
+  --region us-central1 \
   --allow-unauthenticated \
-  --set-env-vars "GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_CLOUD_LOCATION=${REGION},EVALUATION_BUCKET_NAME=${BUCKET},GEMINI_MODEL=gemini-2.5-flash,FIRESTORE_COLLECTION_JOBS=githubanalysis_jobs" \
-  --set-secrets "GITHUB_TOKEN=github-token:latest" \
+  --set-env-vars "GOOGLE_CLOUD_PROJECT=nxt-acad-hackathon,GOOGLE_CLOUD_LOCATION=us-central1,EVALUATION_BUCKET_NAME=nxt-acad-hackathon-hackathon-evaluations,GEMINI_MODEL=gemini-2.5-flash,FIRESTORE_COLLECTION_JOBS=github_analysis_jobs" \
+  --set-secrets "GITHUB_TOKEN=GITHUB_TOKEN:latest,FIREBASE_PROJECT_ID=FIREBASE_PROJECT_ID:latest,FIREBASE_PRIVATE_KEY=FIREBASE_PRIVATE_KEY:latest,FIREBASE_CLIENT_EMAIL=FIREBASE_CLIENT_EMAIL:latest,FIREBASE_DATABASE_URL=FIREBASE_DATABASE_URL:latest,FIREBASE_WEB_API_KEY=FIREBASE_WEB_API_KEY:latest" \
   --memory 1Gi \
   --timeout 300 \
-  --project "$PROJECT_ID"
+  --project nxt-acad-hackathon
 ```
 
 ## Endpoints
