@@ -85,29 +85,24 @@ gcloud services enable \
 # Firestore (once per project)
 gcloud firestore databases create --location="$REGION" --project="$PROJECT_ID" 2>/dev/null || true
 
-# GCS cache bucket
+# GCS cache bucket (optional — cloudbuild.yaml Step 4 creates it if missing)
 gsutil mb -l "$REGION" "gs://${BUCKET}" 2>/dev/null || true
 
 PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')
-RUN_SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
 
-# Cloud Run runtime SA permissions
-for ROLE in roles/aiplatform.user roles/datastore.user roles/storage.objectAdmin; do
-  gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-    --member="serviceAccount:${RUN_SA}" --role="$ROLE" --quiet
-done
-
-# Cloud Build SA — deploy + secret IAM (cloudbuild.yaml ensure-secret-access step)
+# Cloud Build SA — deploy to Cloud Run + push images
 CB_SA="${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com"
-for ROLE in roles/run.admin roles/artifactregistry.writer roles/iam.serviceAccountUser roles/secretmanager.admin; do
+for ROLE in roles/run.admin roles/artifactregistry.writer roles/iam.serviceAccountUser; do
   gcloud projects add-iam-policy-binding "$PROJECT_ID" \
     --member="serviceAccount:${CB_SA}" --role="$ROLE" --quiet
 done
 ```
 
+Runtime SA IAM (Vertex, Firestore, GCS, secrets) is applied automatically in **cloudbuild.yaml Step 5** on each deploy.
+
 **Secrets** (already in Secret Manager): `FIREBASE_PROJECT_ID`, `FIREBASE_PRIVATE_KEY`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_DATABASE_URL`, `FIREBASE_WEB_API_KEY`, `GITHUB_TOKEN`.
 
-**Plain env vars** (set in `cloudbuild.yaml` substitutions): Vertex AI + GCS — `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `EVALUATION_BUCKET_NAME`, `GEMINI_MODEL`, etc.
+**Plain env vars** (Cloud Build substitutions in `cloudbuild.yaml`): Vertex AI + GCS settings.
 
 ### 2. Deploy with Cloud Build
 
@@ -127,18 +122,19 @@ gcloud builds submit --config cloudbuild.yaml \
 
 | Var | Default | Purpose |
 |---|---|---|
-| `_REGION` | `us-central1` | Cloud Run + Vertex region |
-| `_GCP_PROJECT` | `nxt-acad-hackathon` | `GOOGLE_CLOUD_PROJECT` |
+| `_REGION` | `us-central1` | Cloud Run, Vertex, GCS region |
+| `_ENVIRONMENT` | `production` | `ENVIRONMENT` env var |
 | `_GCP_LOCATION` | `us-central1` | `GOOGLE_CLOUD_LOCATION` |
 | `_GCS_BUCKET` | `nxt-acad-hackathon-hackathon-evaluations` | GCS cache bucket |
 | `_GEMINI_MODEL` | `gemini-2.5-flash` | Vertex Gemini model |
 | `_GCS_CACHE_PREFIX` | `github-cache` | GCS object prefix |
 | `_FIRESTORE_COLLECTION` | `github_analysis_jobs` | Firestore jobs collection |
-| `_RUN_SERVICE_ACCOUNT` | *(empty)* | Custom runtime SA email |
 
 **Notes:**
-- Firebase + `GITHUB_TOKEN` come from your existing Secret Manager secrets (same names as env vars).
+- Follows the same Cloud Build pattern as `ai-hackathon-evaluator-backend`: substitutions → AR → build → push → GCS → deploy.
+- Firebase + `GITHUB_TOKEN` mounted via `--update-secrets` (your existing Secret Manager names).
 - Vertex AI uses the **Cloud Run runtime SA** (ADC), not the Firebase Admin key.
+- Image tagged with `$BUILD_ID` (deploy), `$SHORT_SHA` (git triggers), and `latest`.
 
 ### Manual deploy (alternative)
 

@@ -1,156 +1,136 @@
-# Deploy github-analyser to Cloud Run via Cloud Build.
+# Environment-specific values are Cloud Build substitutions (override per trigger).
+# Production GCP (master): defaults below.
+# Staging GCP (dev-feature): override in the trigger — see README "Deploy".
 #
-# Secrets (already in GCP Secret Manager — same id as env var name):
+# Prerequisite: Secret Manager secrets (same id as env var name):
 #   FIREBASE_PROJECT_ID, FIREBASE_PRIVATE_KEY, FIREBASE_CLIENT_EMAIL,
 #   FIREBASE_DATABASE_URL, FIREBASE_WEB_API_KEY, GITHUB_TOKEN
-#
-# Vertex AI + GCS settings are plain env vars below (not secrets).
 #
 # Deploy:
 #   gcloud builds submit --config cloudbuild.yaml --project=nxt-acad-hackathon
 
 substitutions:
   _REGION: us-central1
-  _SERVICE: github-analyser
-  _AR_REPO: cloud-run-source-deploy
-  _RUN_SERVICE_ACCOUNT: ""
-  # Vertex AI + GCS (non-secret — edit here if needed)
-  _GCP_PROJECT: nxt-acad-hackathon
+  _ENVIRONMENT: production
+  # Vertex AI + GCS (non-secret). GITHUB_TOKEN + FIREBASE_* from Secret Manager.
   _GCP_LOCATION: us-central1
   _GCS_BUCKET: nxt-acad-hackathon-hackathon-evaluations
   _GEMINI_MODEL: gemini-2.5-flash
   _GCS_CACHE_PREFIX: github-cache
-  _GITHUB_CACHE_TTL: "86400"
+  _GITHUB_CACHE_TTL: '86400'
   _FIRESTORE_COLLECTION: github_analysis_jobs
 
 steps:
+  # Step 1: Ensure Artifact Registry repository exists (required before first push)
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk
-    id: ensure-artifact-registry
     entrypoint: bash
     args:
       - -c
       - |
-        set -euo pipefail
-        gcloud artifacts repositories describe "${_AR_REPO}" \
-          --location="${_REGION}" \
-          --project="$PROJECT_ID" 2>/dev/null || \
-        gcloud artifacts repositories create "${_AR_REPO}" \
-          --repository-format=docker \
-          --location="${_REGION}" \
-          --description="Cloud Run images for github-analyser" \
-          --project="$PROJECT_ID"
+        gcloud artifacts repositories describe github-analyser \
+          --location=${_REGION} \
+          --project=$PROJECT_ID 2>/dev/null \
+          || gcloud artifacts repositories create github-analyser \
+            --repository-format=docker \
+            --location=${_REGION} \
+            --description="Docker repository for GitHub Analyser" \
+            --project=$PROJECT_ID
 
+  # Step 2: Build Docker image
   - name: gcr.io/cloud-builders/docker
-    id: build
     args:
       - build
       - -t
-      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$BUILD_ID
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/github-analyser/github-analyser:$BUILD_ID
       - -t
-      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:latest
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/github-analyser/github-analyser:$SHORT_SHA
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/github-analyser/github-analyser:latest
       - .
 
+  # Step 3: Push image to Artifact Registry
   - name: gcr.io/cloud-builders/docker
-    id: push
     args:
       - push
       - --all-tags
-      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/github-analyser/github-analyser
 
+  # Step 4: Ensure GCS cache bucket exists (colocated with Cloud Run + Vertex)
+  # Note: bash vars must use $$ so Cloud Build does not treat them as substitutions.
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk
-    id: ensure-secret-access
     entrypoint: bash
     args:
       - -c
       - |
         set -euo pipefail
-        if [[ -n "${_RUN_SERVICE_ACCOUNT}" ]]; then
-          RUN_SA="${_RUN_SERVICE_ACCOUNT}"
-        else
-          PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')
-          RUN_SA="$${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
-        fi
-
-        for SECRET_ID in \
-          GITHUB_TOKEN \
-          FIREBASE_PROJECT_ID \
-          FIREBASE_PRIVATE_KEY \
-          FIREBASE_CLIENT_EMAIL \
-          FIREBASE_DATABASE_URL \
-          FIREBASE_WEB_API_KEY; do
-          if ! gcloud secrets describe "$${SECRET_ID}" --project="$PROJECT_ID" >/dev/null 2>&1; then
-            echo "ERROR: Secret '$${SECRET_ID}' not found in project $PROJECT_ID" >&2
-            exit 1
+        BUCKET=gs://${_GCS_BUCKET}
+        DESIRED_LOCATION=${_REGION}
+        if gcloud storage buckets describe "$$BUCKET" >/dev/null 2>&1; then
+          CURRENT_LOCATION=$$(gcloud storage buckets describe "$$BUCKET" --format='value(location)' | tr '[:upper:]' '[:lower:]')
+          if [ "$$CURRENT_LOCATION" != "$$DESIRED_LOCATION" ]; then
+            echo "WARNING: $$BUCKET is in $$CURRENT_LOCATION (want $$DESIRED_LOCATION)."
+            echo "Keeping existing bucket — GCS locations are immutable."
+          else
+            echo "Bucket $$BUCKET already in $$DESIRED_LOCATION"
           fi
-          gcloud secrets add-iam-policy-binding "$${SECRET_ID}" \
-            --member="serviceAccount:$${RUN_SA}" \
-            --role=roles/secretmanager.secretAccessor \
-            --project="$PROJECT_ID" \
-            --quiet
-        done
-        echo "Secret accessor granted to $${RUN_SA}"
+        else
+          gcloud storage buckets create "$$BUCKET" \
+            --location="$$DESIRED_LOCATION" \
+            --uniform-bucket-level-access
+          echo "Created $$BUCKET in $$DESIRED_LOCATION"
+        fi
 
+  # Step 5: Deploy to Cloud Run
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk
-    id: deploy
     entrypoint: bash
     args:
       - -c
       - |
         set -euo pipefail
-        IMAGE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$BUILD_ID"
+        IMAGE=${_REGION}-docker.pkg.dev/$PROJECT_ID/github-analyser/github-analyser:$BUILD_ID
 
-        ENV_VARS="GOOGLE_CLOUD_PROJECT=${_GCP_PROJECT}"
-        ENV_VARS="$${ENV_VARS},GOOGLE_CLOUD_LOCATION=${_GCP_LOCATION}"
-        ENV_VARS="$${ENV_VARS},EVALUATION_BUCKET_NAME=${_GCS_BUCKET}"
-        ENV_VARS="$${ENV_VARS},GEMINI_MODEL=${_GEMINI_MODEL}"
-        ENV_VARS="$${ENV_VARS},VERTEX_ENABLED=true"
-        ENV_VARS="$${ENV_VARS},GCS_CACHE_PREFIX=${_GCS_CACHE_PREFIX}"
-        ENV_VARS="$${ENV_VARS},GITHUB_CACHE_TTL_SECONDS=${_GITHUB_CACHE_TTL}"
-        ENV_VARS="$${ENV_VARS},FIRESTORE_COLLECTION_JOBS=${_FIRESTORE_COLLECTION}"
-        ENV_VARS="$${ENV_VARS},HOST=0.0.0.0"
+        gcloud run deploy github-analyser \
+          --image="$$IMAGE" \
+          --region=${_REGION} \
+          --platform=managed \
+          --allow-unauthenticated \
+          --port=8080 \
+          --memory=1Gi \
+          --cpu=1 \
+          --timeout=300 \
+          --concurrency=10 \
+          --min-instances=0 \
+          --max-instances=10 \
+          --update-secrets=FIREBASE_PROJECT_ID=FIREBASE_PROJECT_ID:latest,FIREBASE_PRIVATE_KEY=FIREBASE_PRIVATE_KEY:latest,FIREBASE_CLIENT_EMAIL=FIREBASE_CLIENT_EMAIL:latest,FIREBASE_DATABASE_URL=FIREBASE_DATABASE_URL:latest,FIREBASE_WEB_API_KEY=FIREBASE_WEB_API_KEY:latest,GITHUB_TOKEN=GITHUB_TOKEN:latest \
+          --set-env-vars=ENVIRONMENT=${_ENVIRONMENT},GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_CLOUD_LOCATION=${_GCP_LOCATION},EVALUATION_BUCKET_NAME=${_GCS_BUCKET},GEMINI_MODEL=${_GEMINI_MODEL},VERTEX_ENABLED=true,GCS_CACHE_PREFIX=${_GCS_CACHE_PREFIX},GITHUB_CACHE_TTL_SECONDS=${_GITHUB_CACHE_TTL},FIRESTORE_COLLECTION_JOBS=${_FIRESTORE_COLLECTION},HOST=0.0.0.0 \
+          --project=$PROJECT_ID
 
-        SECRETS="GITHUB_TOKEN=GITHUB_TOKEN:latest"
-        SECRETS="$${SECRETS},FIREBASE_PROJECT_ID=FIREBASE_PROJECT_ID:latest"
-        SECRETS="$${SECRETS},FIREBASE_PRIVATE_KEY=FIREBASE_PRIVATE_KEY:latest"
-        SECRETS="$${SECRETS},FIREBASE_CLIENT_EMAIL=FIREBASE_CLIENT_EMAIL:latest"
-        SECRETS="$${SECRETS},FIREBASE_DATABASE_URL=FIREBASE_DATABASE_URL:latest"
-        SECRETS="$${SECRETS},FIREBASE_WEB_API_KEY=FIREBASE_WEB_API_KEY:latest"
+        SERVICE_URL=$$(gcloud run services describe github-analyser \
+          --region=${_REGION} --project=$PROJECT_ID --format='value(status.url)')
+        echo "Deployed: $$SERVICE_URL"
 
-        DEPLOY_ARGS=(
-          run deploy "${_SERVICE}"
-          --image="$${IMAGE}"
-          --region="${_REGION}"
-          --platform=managed
-          --allow-unauthenticated
-          --port=8080
-          --memory=1Gi
-          --cpu=1
-          --timeout=300
-          --concurrency=10
-          --min-instances=0
-          --max-instances=10
-          --set-env-vars="$${ENV_VARS}"
-          --set-secrets="$${SECRETS}"
-          --project="$PROJECT_ID"
-        )
-
-        if [[ -n "${_RUN_SERVICE_ACCOUNT}" ]]; then
-          DEPLOY_ARGS+=(--service-account="${_RUN_SERVICE_ACCOUNT}")
-        fi
-
-        gcloud "$${DEPLOY_ARGS[@]}"
-
-        gcloud run services describe "${_SERVICE}" \
-          --region="${_REGION}" \
-          --project="$PROJECT_ID" \
-          --format='value(status.url)'
+        # Runtime SA — Vertex AI, Firestore, GCS cache
+        PROJECT_NUMBER=$$(gcloud projects describe $PROJECT_ID --format='value(projectNumber)')
+        RUNTIME_SA=$${PROJECT_NUMBER}-compute@developer.gserviceaccount.com
+        for ROLE in roles/aiplatform.user roles/datastore.user roles/storage.objectAdmin roles/secretmanager.secretAccessor; do
+          gcloud projects add-iam-policy-binding $PROJECT_ID \
+            --member="serviceAccount:$${RUNTIME_SA}" \
+            --role="$$ROLE" \
+            --condition=None \
+            --quiet || true
+        done
+    env:
+      - CLOUDSDK_COMPUTE_REGION=${_REGION}
 
 images:
-  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$BUILD_ID
-  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:latest
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/github-analyser/github-analyser:$BUILD_ID
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/github-analyser/github-analyser:$SHORT_SHA
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/github-analyser/github-analyser:latest
 
 options:
+  machineType: E2_HIGHCPU_8
   logging: CLOUD_LOGGING_ONLY
 
-# Cloud Build SA: roles/run.admin, roles/artifactregistry.writer,
-# roles/iam.serviceAccountUser, roles/secretmanager.admin
+timeout: 1800s
+
+# Cloud Build SA: roles/run.admin, roles/artifactregistry.writer, roles/iam.serviceAccountUser
