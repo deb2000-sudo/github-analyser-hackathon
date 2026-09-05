@@ -6,7 +6,6 @@ Pluggable GitHub repo analysis for hackathon submissions.
 |---|---|
 | API | FastAPI on **Cloud Run** |
 | Jobs | **Firestore** (Firebase Admin) |
-| Cache | **GCS** (repo snapshots by `owner/repo@sha`) |
 | LLM | **Vertex AI Gemini** |
 
 The caller selects which metrics to run per request — the service never hardcodes “always check everything.”
@@ -17,7 +16,7 @@ Requires [uv](https://docs.astral.sh/uv/) (`curl -LsSf https://astral.sh/uv/inst
 
 ```bash
 cp .env.example .env
-# fill Firebase SA fields, GOOGLE_CLOUD_PROJECT, EVALUATION_BUCKET_NAME, GITHUB_TOKEN
+# fill Firebase SA fields, GOOGLE_CLOUD_PROJECT, GITHUB_TOKEN
 # Local: Firebase private key in .env is enough (no gcloud ADC required)
 # Or: gcloud auth application-default login
 
@@ -38,21 +37,17 @@ Static metrics work without Vertex; LLM halves need `GOOGLE_CLOUD_PROJECT` + Ver
 ```bash
 export PROJECT_ID=your-gcp-project
 export REGION=us-central1
-export BUCKET=${PROJECT_ID}-github-analyser-cache
 
 gcloud services enable \
   run.googleapis.com \
   cloudbuild.googleapis.com \
   aiplatform.googleapis.com \
   firestore.googleapis.com \
-  storage.googleapis.com \
   artifactregistry.googleapis.com \
   --project="$PROJECT_ID"
 
 # Native Firestore (Firebase) — create once in console or:
 gcloud firestore databases create --location="$REGION" --project="$PROJECT_ID"
-
-gsutil mb -l "$REGION" "gs://${BUCKET}"
 ```
 
 ### IAM (Cloud Run runtime SA)
@@ -61,7 +56,6 @@ Grant the Cloud Run service account:
 
 - `roles/aiplatform.user` — Vertex AI Gemini
 - `roles/datastore.user` — Firestore
-- `roles/storage.objectAdmin` — GCS cache bucket (or objectCreator + objectViewer)
 
 ## Deploy (Cloud Build → Cloud Run)
 
@@ -70,23 +64,18 @@ Grant the Cloud Run service account:
 ```bash
 export PROJECT_ID=your-gcp-project
 export REGION=us-central1
-export BUCKET=${PROJECT_ID}-hackathon-evaluations
 
 gcloud services enable \
   run.googleapis.com \
   cloudbuild.googleapis.com \
   aiplatform.googleapis.com \
   firestore.googleapis.com \
-  storage.googleapis.com \
   artifactregistry.googleapis.com \
   secretmanager.googleapis.com \
   --project="$PROJECT_ID"
 
 # Firestore (once per project)
 gcloud firestore databases create --location="$REGION" --project="$PROJECT_ID" 2>/dev/null || true
-
-# GCS cache bucket (optional — cloudbuild.yaml Step 4 creates it if missing)
-gsutil mb -l "$REGION" "gs://${BUCKET}" 2>/dev/null || true
 
 PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')
 
@@ -98,11 +87,9 @@ for ROLE in roles/run.admin roles/artifactregistry.writer roles/iam.serviceAccou
 done
 ```
 
-Runtime SA IAM (Vertex, Firestore, GCS, secrets) is applied automatically in **cloudbuild.yaml Step 5** on each deploy.
-
 **Secrets** (already in Secret Manager): `FIREBASE_PROJECT_ID`, `FIREBASE_PRIVATE_KEY`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_DATABASE_URL`, `FIREBASE_WEB_API_KEY`, `GITHUB_TOKEN`.
 
-**Plain env vars** (Cloud Build substitutions in `cloudbuild.yaml`): Vertex AI + GCS settings.
+**Plain env vars** (Cloud Build substitutions in `cloudbuild.yaml`): Vertex AI settings.
 
 ### 2. Deploy with Cloud Build
 
@@ -110,11 +97,11 @@ Runtime SA IAM (Vertex, Firestore, GCS, secrets) is applied automatically in **c
 gcloud builds submit --config cloudbuild.yaml --project=nxt-acad-hackathon
 ```
 
-The final deploy step prints the **Cloud Run URL**. Vertex AI + GCS settings are baked into `cloudbuild.yaml` substitutions; override only if needed:
+The final deploy step prints the **Cloud Run URL**. Vertex AI settings are baked into `cloudbuild.yaml` substitutions; override only if needed:
 
 ```bash
 gcloud builds submit --config cloudbuild.yaml \
-  --substitutions=_GCS_BUCKET=my-other-bucket,_GEMINI_MODEL=gemini-2.0-flash \
+  --substitutions=_GEMINI_MODEL=gemini-2.0-flash \
   --project=nxt-acad-hackathon
 ```
 
@@ -122,17 +109,15 @@ gcloud builds submit --config cloudbuild.yaml \
 
 | Var | Default | Purpose |
 |---|---|---|
-| `_REGION` | `us-central1` | Cloud Run, Vertex, GCS region |
+| `_REGION` | `us-central1` | Cloud Run + Vertex region |
 | `_ENVIRONMENT` | `production` | `ENVIRONMENT` env var |
 | `_GCP_LOCATION` | `us-central1` | `GOOGLE_CLOUD_LOCATION` |
-| `_GCS_BUCKET` | `nxt-acad-hackathon-hackathon-evaluations` | GCS cache bucket |
 | `_GEMINI_MODEL` | `gemini-2.5-flash` | Vertex Gemini model |
-| `_GCS_CACHE_PREFIX` | `github-cache` | GCS object prefix |
 | `_FIRESTORE_COLLECTION` | `github_analysis_jobs` | Firestore jobs collection |
 | `_RUN_SERVICE_ACCOUNT` | `nxt-acad-ai-hackathon-evaluate@nxt-acad-hackathon.iam.gserviceaccount.com` | Cloud Run runtime SA |
 
 **Notes:**
-- Cloud Run uses `_RUN_SERVICE_ACCOUNT` (not the default compute SA) so Secret Manager, Vertex, Firestore, and GCS permissions apply.
+- Cloud Run uses `_RUN_SERVICE_ACCOUNT` (not the default compute SA) so Secret Manager, Vertex, and Firestore permissions apply.
 - Firebase + `GITHUB_TOKEN` mounted via `--update-secrets` (your existing Secret Manager names).
 - Vertex AI uses the **Cloud Run runtime SA** (ADC), not the Firebase Admin key.
 - Image tagged with `$BUILD_ID` (deploy), `$SHORT_SHA` (git triggers), and `latest`.
@@ -145,7 +130,7 @@ gcloud run deploy github-analyser \
   --region us-central1 \
   --service-account nxt-acad-ai-hackathon-evaluate@nxt-acad-hackathon.iam.gserviceaccount.com \
   --allow-unauthenticated \
-  --set-env-vars "GOOGLE_CLOUD_PROJECT=nxt-acad-hackathon,GOOGLE_CLOUD_LOCATION=us-central1,EVALUATION_BUCKET_NAME=nxt-acad-hackathon-hackathon-evaluations,GEMINI_MODEL=gemini-2.5-flash,FIRESTORE_COLLECTION_JOBS=github_analysis_jobs" \
+  --set-env-vars "GOOGLE_CLOUD_PROJECT=nxt-acad-hackathon,GOOGLE_CLOUD_LOCATION=us-central1,GEMINI_MODEL=gemini-2.5-flash,FIRESTORE_COLLECTION_JOBS=github_analysis_jobs" \
   --set-secrets "GITHUB_TOKEN=GITHUB_TOKEN:latest,FIREBASE_PROJECT_ID=FIREBASE_PROJECT_ID:latest,FIREBASE_PRIVATE_KEY=FIREBASE_PRIVATE_KEY:latest,FIREBASE_CLIENT_EMAIL=FIREBASE_CLIENT_EMAIL:latest,FIREBASE_DATABASE_URL=FIREBASE_DATABASE_URL:latest,FIREBASE_WEB_API_KEY=FIREBASE_WEB_API_KEY:latest" \
   --memory 1Gi \
   --timeout 300 \
@@ -225,7 +210,6 @@ Full-stack partial credit: frontend-only or backend-only earns **20%** of that r
 |---|---|
 | `GOOGLE_CLOUD_PROJECT` | GCP / Firebase project (`GCP_PROJECT_ID` still accepted) |
 | `GOOGLE_CLOUD_LOCATION` | Vertex region (e.g. `us-central1`) |
-| `EVALUATION_BUCKET_NAME` | Snapshot cache bucket (`GCS_BUCKET` still accepted) |
 | `GEMINI_MODEL` | e.g. `gemini-2.5-flash` (`VERTEX_MODEL` still accepted) |
 | `VERTEX_ENABLED` | `true`/`false` |
 | `FIRESTORE_COLLECTION_JOBS` | default `githubanalysis_jobs` |

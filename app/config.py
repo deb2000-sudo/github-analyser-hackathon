@@ -46,14 +46,6 @@ class Settings(BaseSettings):
     # Isolated collection for this analyser (not shared with other hackathon apps)
     firestore_collection_jobs: str = "githubanalysis_jobs"
 
-    # GCS — .env uses EVALUATION_BUCKET_NAME
-    gcs_bucket: str | None = Field(
-        default=None,
-        validation_alias=AliasChoices("EVALUATION_BUCKET_NAME", "GCS_BUCKET"),
-    )
-    gcs_cache_prefix: str = "github-cache"
-    github_cache_ttl_seconds: int = 86400
-
     # Vertex AI Gemini — .env uses GEMINI_MODEL
     vertex_model: str = Field(
         default="gemini-2.5-flash",
@@ -75,15 +67,21 @@ class Settings(BaseSettings):
 
     @property
     def llm_enabled(self) -> bool:
-        return bool(self.vertex_enabled and self.resolved_project_id)
+        return bool(self.vertex_enabled and self.vertex_project_id)
 
     @property
-    def gcs_enabled(self) -> bool:
-        return bool(self.gcs_bucket)
+    def firestore_project_id(self) -> str | None:
+        """Firebase / Firestore project."""
+        return self.firebase_project_id or self.gcp_project_id
+
+    @property
+    def vertex_project_id(self) -> str | None:
+        """Vertex AI project (ADC). Can differ from Firebase locally."""
+        return self.gcp_project_id or self.firebase_project_id
 
     @property
     def resolved_project_id(self) -> str | None:
-        return self.gcp_project_id or self.firebase_project_id
+        return self.vertex_project_id
 
     def service_account_info(self) -> dict[str, Any] | None:
         """Build a Google service-account dict from .env fields or JSON."""
@@ -93,7 +91,7 @@ class Settings(BaseSettings):
                 return info
             return None
         if self.firebase_client_email and self.firebase_private_key:
-            project = self.firebase_project_id or self.gcp_project_id
+            project = self.firestore_project_id
             return {
                 "type": "service_account",
                 "project_id": project,
@@ -111,18 +109,6 @@ class Settings(BaseSettings):
                 "universe_domain": "googleapis.com",
             }
         return None
-
-    def google_credentials(self) -> Any | None:
-        """Firebase SA credentials for Firestore/GCS. Vertex uses ADC instead."""
-        info = self.service_account_info()
-        if not info:
-            return None
-        from google.oauth2 import service_account
-
-        return service_account.Credentials.from_service_account_info(
-            info,
-            scopes=["https://www.googleapis.com/auth/cloud-platform"],
-        )
 
     def vertex_credentials(self) -> Any | None:
         """User/Cloud Run ADC for Vertex. Never the Firebase Admin service account."""
