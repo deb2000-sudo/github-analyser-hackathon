@@ -9,7 +9,6 @@ from urllib.parse import urlparse
 import httpx
 
 from app.config import Settings, get_settings
-from app.gcs_cache import GcsCache
 from app.github.validation import RepoAccessInfo
 
 GITHUB_API = "https://api.github.com"
@@ -31,7 +30,7 @@ class RepoRef:
 
 @dataclass
 class RepoSnapshot:
-    """Fetched (or cached) view of a repository used by all metrics."""
+    """Fetched view of a repository used by all metrics."""
 
     ref: RepoRef
     tree: list[dict[str, Any]] = field(default_factory=list)
@@ -94,9 +93,8 @@ MANIFEST_NAMES = frozenset(
 
 
 class GithubClient:
-    def __init__(self, settings: Settings | None = None, cache: GcsCache | None = None):
+    def __init__(self, settings: Settings | None = None):
         self.settings = settings or get_settings()
-        self.cache = cache if cache is not None else GcsCache(self.settings)
         headers = {
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
@@ -153,16 +151,6 @@ class GithubClient:
         resp.raise_for_status()
         return resp.json()
 
-    async def _cache_get(self, key: str) -> dict[str, Any] | None:
-        if not self.cache.enabled:
-            return None
-        return await asyncio.to_thread(self.cache.get, key)
-
-    async def _cache_set(self, key: str, payload: dict[str, Any]) -> None:
-        if not self.cache.enabled:
-            return
-        await asyncio.to_thread(self.cache.set, key, payload)
-
     async def fetch_snapshot(
         self,
         github_url: str,
@@ -178,18 +166,6 @@ class GithubClient:
                 client, f"/repos/{ref.owner}/{ref.name}/branches/{ref.default_branch}"
             )
             ref.commit_sha = branch["commit"]["sha"]
-
-            cache_key = f"{ref.full_name}@{ref.commit_sha}:snapshot"
-            cached = await self._cache_get(cache_key)
-            if cached:
-                return RepoSnapshot(
-                    ref=ref,
-                    tree=cached.get("tree", []),
-                    file_contents=cached.get("file_contents", {}),
-                    commits=cached.get("commits", []),
-                    contributors=cached.get("contributors", []),
-                    package_manifests=cached.get("package_manifests", {}),
-                )
 
             tree_resp, commits, contributors = await self._fetch_repo_metadata(client, ref)
 
@@ -225,7 +201,7 @@ class GithubClient:
                 p: c for p, c in file_contents.items() if p.split("/")[-1] in MANIFEST_NAMES
             }
 
-            snapshot = RepoSnapshot(
+            return RepoSnapshot(
                 ref=ref,
                 tree=tree,
                 file_contents=file_contents,
@@ -233,17 +209,6 @@ class GithubClient:
                 contributors=contributors,
                 package_manifests=package_manifests,
             )
-            await self._cache_set(
-                cache_key,
-                {
-                    "tree": tree,
-                    "file_contents": file_contents,
-                    "commits": commits,
-                    "contributors": contributors,
-                    "package_manifests": package_manifests,
-                },
-            )
-            return snapshot
 
     async def _fetch_repo_metadata(
         self,

@@ -4,7 +4,6 @@ import asyncio
 from typing import Any
 
 from app.config import get_settings
-from app.gcs_cache import GcsCache
 from app.github.client import GithubClient
 from app.github.validation import access_payload
 from app.jobs import Job, JobStatus, JobStore
@@ -47,7 +46,7 @@ async def run_pipeline(job_id: str) -> None:
     await asyncio.to_thread(store.update, job_id, status=JobStatus.running.value)
 
     settings = get_settings()
-    gh = GithubClient(settings=settings, cache=GcsCache(settings))
+    gh = GithubClient(settings=settings)
     llm = LLMClient(settings=settings)
 
     requested: list[str] = list(job.metrics_requested or [])

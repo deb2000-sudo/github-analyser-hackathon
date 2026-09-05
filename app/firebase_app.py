@@ -21,7 +21,7 @@ def init_firebase() -> firebase_admin.App:
 
     settings = get_settings()
     options: dict[str, Any] = {}
-    project_id = settings.resolved_project_id
+    project_id = settings.firestore_project_id
     if project_id:
         options["projectId"] = project_id
     if settings.firebase_database_url:

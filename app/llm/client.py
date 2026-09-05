@@ -22,7 +22,7 @@ class LLMClient:
             # Firebase Admin SA from the process and Vertex returns 403.
             self._client = genai.Client(
                 vertexai=True,
-                project=self.settings.resolved_project_id,
+                project=self.settings.vertex_project_id,
                 location=self.settings.gcp_location,
                 credentials=self.settings.vertex_credentials(),
             )

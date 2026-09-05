@@ -12,12 +12,9 @@
 substitutions:
   _REGION: us-central1
   _ENVIRONMENT: production
-  # Vertex AI + GCS (non-secret). GITHUB_TOKEN + FIREBASE_* from Secret Manager.
+  # Vertex AI (non-secret). GITHUB_TOKEN + FIREBASE_* from Secret Manager.
   _GCP_LOCATION: us-central1
-  _GCS_BUCKET: nxt-acad-hackathon-hackathon-evaluations
   _GEMINI_MODEL: gemini-2.5-flash
-  _GCS_CACHE_PREFIX: github-cache
-  _GITHUB_CACHE_TTL: '86400'
   _FIRESTORE_COLLECTION: github_analysis_jobs
   # Cloud Run runtime SA — same project as this Cloud Build (must have Secret Manager access).
   # Do not use nxt-acad-ai-hackathon-evaluator@nxt-create-deb (different project → actAs denied).
@@ -58,32 +55,7 @@ steps:
       - --all-tags
       - ${_REGION}-docker.pkg.dev/$PROJECT_ID/github-analyser/github-analyser
 
-  # Step 4: Ensure GCS cache bucket exists (colocated with Cloud Run + Vertex)
-  # Note: bash vars must use $$ so Cloud Build does not treat them as substitutions.
-  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
-    entrypoint: bash
-    args:
-      - -c
-      - |
-        set -euo pipefail
-        BUCKET=gs://${_GCS_BUCKET}
-        DESIRED_LOCATION=${_REGION}
-        if gcloud storage buckets describe "$$BUCKET" >/dev/null 2>&1; then
-          CURRENT_LOCATION=$$(gcloud storage buckets describe "$$BUCKET" --format='value(location)' | tr '[:upper:]' '[:lower:]')
-          if [ "$$CURRENT_LOCATION" != "$$DESIRED_LOCATION" ]; then
-            echo "WARNING: $$BUCKET is in $$CURRENT_LOCATION (want $$DESIRED_LOCATION)."
-            echo "Keeping existing bucket — GCS locations are immutable."
-          else
-            echo "Bucket $$BUCKET already in $$DESIRED_LOCATION"
-          fi
-        else
-          gcloud storage buckets create "$$BUCKET" \
-            --location="$$DESIRED_LOCATION" \
-            --uniform-bucket-level-access
-          echo "Created $$BUCKET in $$DESIRED_LOCATION"
-        fi
-
-  # Step 5: Deploy to Cloud Run
+  # Step 4: Deploy to Cloud Run
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk
     entrypoint: bash
     args:
@@ -106,7 +78,7 @@ steps:
           --min-instances=0 \
           --max-instances=10 \
           --update-secrets=FIREBASE_PROJECT_ID=FIREBASE_PROJECT_ID:latest,FIREBASE_PRIVATE_KEY=FIREBASE_PRIVATE_KEY:latest,FIREBASE_CLIENT_EMAIL=FIREBASE_CLIENT_EMAIL:latest,FIREBASE_DATABASE_URL=FIREBASE_DATABASE_URL:latest,FIREBASE_WEB_API_KEY=FIREBASE_WEB_API_KEY:latest,GITHUB_TOKEN=GITHUB_TOKEN:latest \
-          --set-env-vars=ENVIRONMENT=${_ENVIRONMENT},GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_CLOUD_LOCATION=${_GCP_LOCATION},EVALUATION_BUCKET_NAME=${_GCS_BUCKET},GEMINI_MODEL=${_GEMINI_MODEL},VERTEX_ENABLED=true,GCS_CACHE_PREFIX=${_GCS_CACHE_PREFIX},GITHUB_CACHE_TTL_SECONDS=${_GITHUB_CACHE_TTL},FIRESTORE_COLLECTION_JOBS=${_FIRESTORE_COLLECTION},HOST=0.0.0.0 \
+          --set-env-vars=ENVIRONMENT=${_ENVIRONMENT},GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_CLOUD_LOCATION=${_GCP_LOCATION},GEMINI_MODEL=${_GEMINI_MODEL},VERTEX_ENABLED=true,FIRESTORE_COLLECTION_JOBS=${_FIRESTORE_COLLECTION},HOST=0.0.0.0 \
           --project=$PROJECT_ID
 
         SERVICE_URL=$$(gcloud run services describe github-analyser \

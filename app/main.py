@@ -25,7 +25,7 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(
     title="Repo Analysis Microservice",
-    description="Pluggable GitHub repo analysis — Vertex AI Gemini, Firestore, GCS.",
+    description="Pluggable GitHub repo analysis — Vertex AI Gemini, Firestore.",
     version=__version__,
     lifespan=lifespan,
 )
