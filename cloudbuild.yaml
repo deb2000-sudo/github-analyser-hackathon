@@ -18,7 +18,7 @@ substitutions:
   _FIRESTORE_COLLECTION: github_analysis_jobs
   # Cloud Run runtime SA — same project as this Cloud Build (must have Secret Manager access).
   # Do not use nxt-acad-ai-hackathon-evaluator@nxt-create-deb (different project → actAs denied).
-  _RUN_SERVICE_ACCOUNT: nxt-acad-ai-hackathon-evaluate@nxt-acad-hackathon.iam.gserviceaccount.com
+  _RUN_SERVICE_ACCOUNT: github-analyser-sa@github-analyser-786.iam.gserviceaccount.com
 
 steps:
   # Step 1: Ensure Artifact Registry repository exists (required before first push)
