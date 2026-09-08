@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from app.analysis.facts import build_code_facts
 from app.config import get_settings
 from app.github.client import GithubClient
 from app.github.validation import access_payload
@@ -87,6 +88,9 @@ async def run_pipeline(job_id: str) -> None:
         if prefetch_paths:
             await gh.fetch_files(snapshot, prefetch_paths)
 
+        code_facts = build_code_facts(snapshot)
+        analysis_payload = code_facts.to_public_dict()
+
         llm_metrics = resolve_llm_metrics(
             requested,
             ai_deps=ai_deps,
@@ -112,6 +116,8 @@ async def run_pipeline(job_id: str) -> None:
                 "agent_frameworks_found": agent_deps,
                 "llm_judgment": {},
                 "skip_file_fetch": True,
+                "code_facts": code_facts,
+                "code_facts_summary": code_facts.summary(),
             },
         )
 
@@ -182,6 +188,7 @@ async def run_pipeline(job_id: str) -> None:
             },
             "context": submission_context or None,
             "metrics": results,
+            "analysis": analysis_payload,
         }
         await asyncio.to_thread(
             store.update,

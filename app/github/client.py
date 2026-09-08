@@ -8,6 +8,9 @@ from urllib.parse import urlparse
 
 import httpx
 
+from app.analysis.manifests import MANIFEST_NAMES
+
+__all__ = ["GithubClient", "RepoRef", "RepoSnapshot", "parse_github_url", "paths_matching", "MANIFEST_NAMES"]
 from app.config import Settings, get_settings
 from app.github.validation import RepoAccessInfo
 
@@ -48,48 +51,6 @@ def parse_github_url(url: str) -> RepoRef:
     parts = [p for p in path.split("/") if p]
     owner, name = parts[0], parts[1]
     return RepoRef(owner=owner, name=name)
-
-
-MANIFEST_NAMES = frozenset(
-    {
-        "package.json",
-        "package-lock.json",
-        "requirements.txt",
-        "pyproject.toml",
-        "Pipfile",
-        "poetry.lock",
-        "go.mod",
-        "pom.xml",
-        "build.gradle",
-        "build.gradle.kts",
-        "Cargo.toml",
-        "composer.json",
-        "Gemfile",
-        "environment.yml",
-        "conda.yml",
-        "vite.config.js",
-        "vite.config.ts",
-        "vite.config.mjs",
-        "next.config.js",
-        "next.config.mjs",
-        "next.config.ts",
-        "vercel.json",
-        "netlify.toml",
-        "angular.json",
-        "svelte.config.js",
-        "Dockerfile",
-        "docker-compose.yml",
-        "docker-compose.yaml",
-        "manage.py",
-        "server.js",
-        "server.ts",
-        "server.py",
-        "main.py",
-        "app.py",
-        "wsgi.py",
-        "asgi.py",
-    }
-)
 
 
 class GithubClient:

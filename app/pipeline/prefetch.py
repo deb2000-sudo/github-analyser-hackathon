@@ -7,16 +7,6 @@ from app.metrics.ai_usage import scan_manifests
 from app.metrics.fullstack import select_core_paths
 from app.metrics.solution_fit import _curate_paths
 
-MANIFEST_NAMES = frozenset(
-    {
-        "package.json",
-        "requirements.txt",
-        "pyproject.toml",
-        "go.mod",
-        "pom.xml",
-    }
-)
-
 
 def collect_prefetch_paths(
     snapshot: RepoSnapshot,
