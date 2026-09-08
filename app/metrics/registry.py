@@ -3,6 +3,7 @@ from __future__ import annotations
 from app.metrics.agent_analysis import AgentAnalysisMetric
 from app.metrics.ai_usage import AiUsageMetric
 from app.metrics.base import Metric
+from app.metrics.frontend_backend import FrontendBackendMetric
 from app.metrics.fullstack import FullstackMetric
 from app.metrics.repo_health import RepoHealthMetric
 from app.metrics.solution_fit import SolutionFitMetric
@@ -20,6 +21,7 @@ def init_registry() -> None:
     for metric in (
         RepoHealthMetric(),
         FullstackMetric(),
+        FrontendBackendMetric(),
         AiUsageMetric(),
         AgentAnalysisMetric(),
         SolutionFitMetric(),

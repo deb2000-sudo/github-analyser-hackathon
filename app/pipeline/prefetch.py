@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.analysis.extract import select_parseable_paths
 from app.github.client import PATH_HINTS, RepoSnapshot, paths_matching
 from app.metrics.ai_usage import scan_manifests
 from app.metrics.fullstack import select_core_paths
@@ -19,6 +20,7 @@ def collect_prefetch_paths(
     """Union of file paths all requested metrics may read — fetch once in parallel."""
     paths: list[str] = []
     tree_paths = [t["path"] for t in snapshot.tree]
+    paths.extend(select_parseable_paths(tree_paths))
 
     if "fullstack" in requested:
         paths.extend(select_core_paths(tree_paths))

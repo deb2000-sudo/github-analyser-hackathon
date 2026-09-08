@@ -24,6 +24,7 @@ from app.scoring.aggregator import aggregate_scores, build_gated_result
 PIPELINE_ORDER = [
     "repo_health",
     "fullstack",
+    "frontend_backend",
     "ai_usage",
     "agent_analysis",
     "solution_fit",
@@ -86,7 +87,7 @@ async def run_pipeline(job_id: str) -> None:
             agent_deps=agent_deps,
         )
         if prefetch_paths:
-            await gh.fetch_files(snapshot, prefetch_paths)
+            await gh.fetch_files(snapshot, prefetch_paths, max_files=100)
 
         code_facts = build_code_facts(snapshot)
         analysis_payload = code_facts.to_public_dict()

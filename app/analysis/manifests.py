@@ -62,6 +62,21 @@ DEPENDENCY_MANIFESTS = frozenset(
 )
 
 
+PHASE2_MANIFESTS = frozenset(
+    {
+        "package.json",
+        "requirements.txt",
+        "pyproject.toml",
+        "pom.xml",
+        "build.gradle",
+        "build.gradle.kts",
+        "go.mod",
+        "Cargo.toml",
+        "composer.json",
+    }
+)
+
+
 def _basename(path: str) -> str:
     return path.replace("\\", "/").rstrip("/").split("/")[-1]
 

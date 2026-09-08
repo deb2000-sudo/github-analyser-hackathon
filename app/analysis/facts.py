@@ -1,22 +1,28 @@
+"""GitHub URL → repository → filtered files → languages → manifests → inventory → source facts.
+
+Phase 3 adds normalized source facts. Call graph and data flow are not built here.
+"""
+
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
-from app.analysis.inventory import build_inventory
+from app.analysis.extract import extract_source_facts
+from app.analysis.inventory import FileInventory, build_inventory
 from app.analysis.manifests import parse_dependencies
 from app.analysis.structure import detect_structure
 
 if TYPE_CHECKING:
     from app.github.client import RepoSnapshot
 
+_MAX_PUBLIC_FACTS = 400
+
 
 @dataclass
 class CodeFacts:
-    """GitHub URL → repository → filtered files → languages → manifests → inventory.
-
-    AST is intentionally omitted in this phase.
-    """
+    """Pipeline snapshot plus language-independent source facts."""
 
     repository: dict[str, Any]
     filtered_files: list[dict[str, Any]]
@@ -24,9 +30,14 @@ class CodeFacts:
     manifests: dict[str, Any]
     inventory: dict[str, Any]
     structure: dict[str, Any]
+    file_inventory: FileInventory
+    source_facts: list[dict[str, Any]]
+    parse_warnings: list[dict[str, Any]]
 
     def to_public_dict(self) -> dict[str, Any]:
-        """Job result.analysis — pipeline stages only, no AST."""
+        """Job result.analysis — normalized facts only, no AST / Tree-sitter nodes."""
+        counts = dict(Counter(str(f.get("fact_type") or "unknown") for f in self.source_facts))
+        truncated = len(self.source_facts) > _MAX_PUBLIC_FACTS
         return {
             "repository": self.repository,
             "filtered_files": {
@@ -42,6 +53,13 @@ class CodeFacts:
                 "manifest_paths": self.manifests.get("manifest_paths") or [],
             },
             "inventory": self.inventory,
+            "source_facts": {
+                "counts": counts,
+                "fact_count": len(self.source_facts),
+                "warnings": self.parse_warnings,
+                "facts": self.source_facts[:_MAX_PUBLIC_FACTS],
+                "truncated": truncated,
+            },
         }
 
     def summary(self) -> dict[str, Any]:
@@ -52,6 +70,8 @@ class CodeFacts:
             "layout": (self.structure or {}).get("layout"),
             "npm_top": (self.manifests.get("npm") or [])[:20],
             "python_top": (self.manifests.get("python") or [])[:20],
+            "source_fact_count": len(self.source_facts),
+            "parse_warning_count": len(self.parse_warnings),
         }
 
 
@@ -96,6 +116,14 @@ def build_code_facts(snapshot: RepoSnapshot) -> CodeFacts:
         "commit_sha": ref.commit_sha,
     }
 
+    file_inventory = FileInventory.from_raw(raw_inventory)
+    contents = dict(snapshot.file_contents or {})
+    for path, content in (snapshot.package_manifests or {}).items():
+        contents.setdefault(path, content)
+    source_facts, parse_warnings = extract_source_facts(
+        contents,
+        file_inventory=file_inventory,
+    )
     return CodeFacts(
         repository=repository,
         filtered_files=files,
@@ -103,4 +131,7 @@ def build_code_facts(snapshot: RepoSnapshot) -> CodeFacts:
         manifests=parsed_manifests,
         inventory=inventory,
         structure=structure,
+        file_inventory=file_inventory,
+        source_facts=source_facts,
+        parse_warnings=parse_warnings,
     )

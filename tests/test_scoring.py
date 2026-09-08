@@ -46,9 +46,9 @@ def test_fullstack_rubric_full_score():
     rubric = {"id": "fullstack", "label": "Full-stack", "weight": 10, "weight_percent": 50, "max_score": 10, "metric": "fullstack"}
     metrics = {
         "fullstack": {
-            "is_fullstack": True,
-            "frontend_detected": {"present": True, "stack_guess": "React"},
-            "backend_detected": {"present": True, "stack_guess": "FastAPI"},
+            "application_type": "full_stack",
+            "frontend": {"detected": True, "framework": "react"},
+            "backend": {"detected": True, "framework": "fastapi"},
         }
     }
     row = score_metric_rubric(rubric, metrics)
@@ -61,10 +61,9 @@ def test_fullstack_partial_frontend_only():
     rubric = {"id": "fullstack", "label": "Full-stack", "weight": 10, "weight_percent": 50, "max_score": 10, "metric": "fullstack"}
     metrics = {
         "fullstack": {
-            "is_fullstack": False,
-            "repo_type": "frontend",
-            "frontend_detected": {"present": True, "stack_guess": "React"},
-            "backend_detected": {"present": False, "stack_guess": None},
+            "application_type": "frontend",
+            "frontend": {"detected": True, "framework": "react"},
+            "backend": {"detected": False, "framework": None},
         }
     }
     row = score_metric_rubric(rubric, metrics)
@@ -78,10 +77,9 @@ def test_fullstack_partial_backend_only():
     rubric = {"id": "fullstack", "label": "Full-stack", "weight": 10, "weight_percent": 50, "max_score": 10, "metric": "fullstack"}
     metrics = {
         "fullstack": {
-            "is_fullstack": False,
-            "repo_type": "backend",
-            "frontend_detected": {"present": False, "stack_guess": None},
-            "backend_detected": {"present": True, "stack_guess": "Express"},
+            "application_type": "backend",
+            "frontend": {"detected": False, "framework": None},
+            "backend": {"detected": True, "framework": "express"},
         }
     }
     row = score_metric_rubric(rubric, metrics)
@@ -132,7 +130,11 @@ def test_solution_fit_context_and_readme_full():
 
 def test_aggregate_total_from_metrics():
     metrics = {
-        "fullstack": {"is_fullstack": True, "frontend_detected": {"stack_guess": "React"}, "backend_detected": {"stack_guess": "FastAPI"}},
+        "fullstack": {
+            "application_type": "full_stack",
+            "frontend": {"detected": True, "framework": "react"},
+            "backend": {"detected": True, "framework": "fastapi"},
+        },
         "ai_usage": {"ai_integration_type": "none", "confidence": "high", "llm_providers": {"uses_llm": False}},
         "agent_analysis": {"status": "skipped"},
         "solution_fit": {

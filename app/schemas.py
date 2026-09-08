@@ -11,7 +11,7 @@ from app.github.validation import (
 )
 
 MetricName = Literal[
-    "fullstack", "ai_usage", "agent_analysis", "repo_health", "solution_fit"
+    "fullstack", "frontend_backend", "ai_usage", "agent_analysis", "repo_health", "solution_fit"
 ]
 JobStatusLiteral = Literal["queued", "running", "succeeded", "failed"]
 Confidence = Literal["low", "medium", "high"]
@@ -69,6 +69,7 @@ class AnalyzeOptions(BaseModel):
     agent_analysis: dict[str, Any] = Field(default_factory=dict)
     ai_usage: dict[str, Any] = Field(default_factory=dict)
     fullstack: dict[str, Any] = Field(default_factory=dict)
+    frontend_backend: dict[str, Any] = Field(default_factory=dict)
     repo_health: dict[str, Any] = Field(default_factory=dict)
     solution_fit: dict[str, Any] = Field(default_factory=dict)
     scoring: ScoringConfig | None = None

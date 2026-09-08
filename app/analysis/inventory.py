@@ -58,6 +58,53 @@ class FileEntry:
         return asdict(self)
 
 
+@dataclass
+class FileInventory:
+    """Filtered repository file list from Phase 1 (no clone, no AST)."""
+
+    files: list[FileEntry]
+    truncated: bool = False
+
+    @classmethod
+    def from_tree(cls, tree: list[dict[str, Any]], *, max_paths: int = 2000) -> FileInventory:
+        raw = build_inventory(tree, max_paths=max_paths)
+        return cls.from_raw(raw)
+
+    @classmethod
+    def from_raw(cls, raw: dict[str, Any]) -> FileInventory:
+        entries: list[FileEntry] = []
+        for item in raw.get("files") or []:
+            if isinstance(item, FileEntry):
+                entries.append(item)
+                continue
+            if isinstance(item, dict) and item.get("path"):
+                entries.append(
+                    FileEntry(
+                        path=str(item["path"]),
+                        name=str(item.get("name") or item["path"].rsplit("/", 1)[-1]),
+                        language=item.get("language"),
+                        role=str(item.get("role") or "other"),
+                        size_bytes=item.get("size_bytes"),
+                    )
+                )
+        return cls(files=entries, truncated=bool(raw.get("truncated")))
+
+    @property
+    def paths(self) -> list[str]:
+        return [f.path for f in self.files]
+
+    @property
+    def names(self) -> set[str]:
+        return {f.name.lower() for f in self.files}
+
+    def files_named(self, *names: str) -> list[FileEntry]:
+        want = {n.lower() for n in names}
+        return [f for f in self.files if f.name.lower() in want]
+
+    def has_named(self, name: str) -> bool:
+        return name.lower() in self.names
+
+
 def _norm(path: str) -> str:
     return path.replace("\\", "/").lstrip("./")
 

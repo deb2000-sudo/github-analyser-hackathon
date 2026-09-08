@@ -394,96 +394,70 @@ class FullstackMetric(Metric):
     name = "fullstack"
     tier = "static"
     description = (
-        "Classifies the repo as frontend, backend, or fullstack by reading core "
-        "manifests and server entry files — not folder names like src/api."
+        "Classifies application type from deterministic manifest and source evidence "
+        "(not directory names). No Gemini."
     )
     output_schema = {
         "type": "object",
         "properties": {
-            "is_fullstack": {"type": "boolean"},
-            "repo_type": {
+            "application_type": {
                 "type": "string",
-                "enum": ["frontend", "backend", "fullstack", "unknown"],
+                "enum": ["frontend", "backend", "full_stack", "library", "cli", "unknown"],
             },
-            "frontend_detected": {
+            "confidence": {"type": "number"},
+            "frontend": {
                 "type": "object",
                 "properties": {
-                    "present": {"type": "boolean"},
-                    "stack_guess": {"type": ["string", "null"]},
+                    "detected": {"type": "boolean"},
+                    "framework": {"type": ["string", "null"]},
                 },
             },
-            "backend_detected": {
+            "backend": {
                 "type": "object",
                 "properties": {
-                    "present": {"type": "boolean"},
-                    "stack_guess": {"type": ["string", "null"]},
+                    "detected": {"type": "boolean"},
+                    "framework": {"type": ["string", "null"]},
                 },
             },
-            "evidence": {
-                "type": "object",
-                "properties": {
-                    "backend_signals": {"type": "array", "items": {"type": "string"}},
-                },
-            },
+            "signals": {"type": "array"},
+            "detected_manifests": {"type": "array", "items": {"type": "string"}},
         },
     }
 
     async def run(self, ctx: MetricContext) -> MetricResult:
-        paths = [t["path"] for t in ctx.snapshot.tree]
+        from app.analysis.frameworks import classify_application
+        from app.analysis.inventory import FileInventory
+        from app.analysis.manifests import PHASE2_MANIFESTS
+
+        facts = ctx.extras.get("code_facts")
+        if facts is not None and getattr(facts, "file_inventory", None) is not None:
+            inventory = facts.file_inventory
+        else:
+            inventory = FileInventory.from_tree(list(ctx.snapshot.tree or []))
+
+        paths = inventory.paths or [t["path"] for t in ctx.snapshot.tree]
         gh = ctx.extras.get("github_client")
         core = select_core_paths(paths)
+        for entry in inventory.files_named(*PHASE2_MANIFESTS, "README.md", "README", "readme.md"):
+            if entry.path not in core:
+                core.append(entry.path)
         if gh is not None and core and not ctx.extras.get("skip_file_fetch"):
             try:
                 await gh.fetch_files(ctx.snapshot, core)
             except Exception:
                 pass
 
-        manifests = dict(ctx.snapshot.package_manifests)
-        for path, content in ctx.snapshot.file_contents.items():
-            if _basename(path) in CORE_CONFIG_NAMES and path not in manifests:
-                if _basename(path) in {
-                    "package.json",
-                    "requirements.txt",
-                    "pyproject.toml",
-                    "go.mod",
-                    "pom.xml",
-                    "Cargo.toml",
-                }:
-                    manifests[path] = content
-
-        deps = _parse_npm_deps(manifests)
-        py_pkgs = _python_packages(manifests)
         contents = dict(ctx.snapshot.file_contents)
+        for path, content in (ctx.snapshot.package_manifests or {}).items():
+            contents.setdefault(path, content)
 
-        fe = _has_frontend(paths, deps, contents)
-        be, be_evidence = _has_backend(paths, deps, py_pkgs, contents)
-
-        if fe:
-            fe_stack: str | None = _guess_frontend_stack(paths, deps)
-        else:
-            fe_stack = None
-        be_stack = _guess_backend_stack(deps, py_pkgs, paths, contents) if be else None
-
-        if fe and be:
-            repo_type = "fullstack"
-        elif fe:
-            repo_type = "frontend"
-        elif be:
-            repo_type = "backend"
-        else:
-            repo_type = "unknown"
-
+        classified = classify_application(inventory, contents)
         data: dict[str, Any] = {
-            "is_fullstack": bool(fe and be),
-            "repo_type": repo_type,
-            "frontend_detected": {
-                "present": fe,
-                "stack_guess": fe_stack,
-            },
-            "backend_detected": {
-                "present": be,
-                "stack_guess": be_stack,
-            },
-            "evidence": {"backend_signals": be_evidence},
+            "application_type": classified["application_type"],
+            "confidence": classified["confidence"],
+            "frontend": classified["frontend"],
+            "backend": classified["backend"],
+            "detected_manifests": classified.get("detected_manifests") or [],
+            "signals": classified.get("signals") or [],
         }
         return MetricResult(name=self.name, status="ok", data=data)

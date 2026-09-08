@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.analysis.frameworks import BACKEND_DISPLAY, FRONTEND_DISPLAY
 from app.github.validation import RepoAccessInfo, access_payload
 from app.scoring.llm_providers import detect_llm_providers
 from app.scoring.readme_quality import analyze_readme, find_readme_content
@@ -14,32 +15,32 @@ def _clamp(score: float, max_score: float) -> float:
     return max(0.0, min(max_score, score))
 
 
+def _fullstack_side(data: dict[str, Any], side: str) -> dict[str, Any]:
+    obj = data.get(side) or {}
+    return obj if isinstance(obj, dict) else {}
+
+
 def _fullstack_side_present(data: dict[str, Any], side: str) -> bool:
-    """Use frontend_detected.present / backend_detected.present — not truthiness of the dict."""
-    obj = data.get(f"{side}_detected") or {}
-    if isinstance(obj, dict) and "present" in obj:
-        return bool(obj.get("present"))
-    repo_type = data.get("repo_type")
-    if side == "frontend":
-        return repo_type == "frontend"
-    return repo_type == "backend"
+    return bool(_fullstack_side(data, side).get("detected"))
+
+
+def _fullstack_label(data: dict[str, Any], side: str, fallback: str) -> str:
+    framework = _fullstack_side(data, side).get("framework")
+    if not framework:
+        return fallback
+    mapping = FRONTEND_DISPLAY if side == "frontend" else BACKEND_DISPLAY
+    return mapping.get(str(framework), str(framework))
 
 
 def _score_fullstack(metrics: dict[str, Any], max_score: float) -> tuple[float, str]:
     data = metrics.get("fullstack") or {}
-    if data.get("is_fullstack"):
-        fe = (data.get("frontend_detected") or {}).get("stack_guess") or "frontend"
-        be = (data.get("backend_detected") or {}).get("stack_guess") or "backend"
-        return max_score, (
-            f"Full-stack (50% weight): both frontend ({fe}) and backend ({be}) detected — "
-            f"awarded full {max_score}/{max_score} for this rubric."
-        )
-
     has_fe = _fullstack_side_present(data, "frontend")
     has_be = _fullstack_side_present(data, "backend")
-    if has_fe and has_be:
-        fe = (data.get("frontend_detected") or {}).get("stack_guess") or "frontend"
-        be = (data.get("backend_detected") or {}).get("stack_guess") or "backend"
+    is_full = data.get("application_type") == "full_stack" or (has_fe and has_be)
+
+    if is_full:
+        fe = _fullstack_label(data, "frontend", "frontend")
+        be = _fullstack_label(data, "backend", "backend")
         return max_score, (
             f"Full-stack (50% weight): both frontend ({fe}) and backend ({be}) detected — "
             f"awarded full {max_score}/{max_score} for this rubric."
@@ -49,10 +50,10 @@ def _score_fullstack(metrics: dict[str, Any], max_score: float) -> tuple[float, 
         partial = _clamp(max_score * FULLSTACK_PARTIAL_RATIO, max_score)
         if has_be and not has_fe:
             side = "backend"
-            stack = (data.get("backend_detected") or {}).get("stack_guess")
+            stack = _fullstack_label(data, "backend", "")
         else:
             side = "frontend"
-            stack = (data.get("frontend_detected") or {}).get("stack_guess")
+            stack = _fullstack_label(data, "frontend", "")
         stack_note = f" ({stack})" if stack else ""
         return partial, (
             f"Full-stack (50% weight): only {side}{stack_note} detected — "

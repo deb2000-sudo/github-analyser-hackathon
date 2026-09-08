@@ -1,7 +1,4 @@
-"""Phase 1: GitHub URL → repository → filtered files → languages → manifests → inventory.
-
-AST is not part of this phase.
-"""
+"""Phase 1 + 3: inventory through normalized source facts. No call graph."""
 
 from __future__ import annotations
 
@@ -59,7 +56,7 @@ def test_parse_dependencies_npm_and_python():
     assert "openai" in deps["python"]
 
 
-def test_build_code_facts_pipeline_without_ast():
+def test_build_code_facts_pipeline_with_source_facts():
     snapshot = RepoSnapshot(
         ref=RepoRef("o", "r", commit_sha="abc123"),
         tree=[
@@ -86,8 +83,12 @@ def test_build_code_facts_pipeline_without_ast():
         "languages",
         "manifests",
         "inventory",
+        "source_facts",
     }
     assert "ast" not in public
+    assert public["source_facts"]["counts"].get("import", 0) >= 1
+    assert public["source_facts"]["counts"].get("function_call", 0) >= 1
+    assert all("lineno" not in f for f in public["source_facts"]["facts"])
     assert public["repository"]["full_name"] == "o/r"
     assert public["repository"]["commit_sha"] == "abc123"
     assert "frontend/src/App.tsx" in public["filtered_files"]["paths"]

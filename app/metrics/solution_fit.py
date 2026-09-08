@@ -176,10 +176,11 @@ def _prior_summaries(prior: dict[str, Any]) -> dict[str, Any]:
     """Compact hints from earlier static metrics for the LLM."""
     out: dict[str, Any] = {}
     if "fullstack" in prior:
+        fs = prior["fullstack"]
         out["fullstack"] = {
-            "is_fullstack": prior["fullstack"].get("is_fullstack"),
-            "frontend": prior["fullstack"].get("frontend_detected"),
-            "backend": prior["fullstack"].get("backend_detected"),
+            "application_type": fs.get("application_type"),
+            "frontend": fs.get("frontend"),
+            "backend": fs.get("backend"),
         }
     if "ai_usage" in prior:
         out["ai_usage"] = {

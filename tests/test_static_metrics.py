@@ -75,10 +75,9 @@ def test_fullstack_detects_react_fastapi():
     )
     result = asyncio.run(FullstackMetric().run(MetricContext(snapshot=snapshot)))
     assert result.status == "ok"
-    assert result.data["is_fullstack"] is True
-    assert result.data["repo_type"] == "fullstack"
-    assert result.data["frontend_detected"]["stack_guess"] == "React"
-    assert result.data["backend_detected"]["stack_guess"] == "FastAPI"
+    assert result.data["application_type"] == "full_stack"
+    assert result.data["frontend"] == {"detected": True, "framework": "react"}
+    assert result.data["backend"] == {"detected": True, "framework": "fastapi"}
 
 
 def test_fullstack_vite_react_with_src_api_is_frontend_only():
@@ -112,12 +111,10 @@ def test_fullstack_vite_react_with_src_api_is_frontend_only():
         },
     )
     result = asyncio.run(FullstackMetric().run(MetricContext(snapshot=snapshot)))
-    assert result.data["frontend_detected"]["present"] is True
-    assert result.data["frontend_detected"]["stack_guess"] == "React"
-    assert result.data["backend_detected"]["present"] is False
-    assert result.data["backend_detected"]["stack_guess"] is None
-    assert result.data["is_fullstack"] is False
-    assert result.data["repo_type"] == "frontend"
+    assert result.data["application_type"] == "frontend"
+    assert result.data["frontend"] == {"detected": True, "framework": "react"}
+    assert result.data["backend"]["detected"] is False
+    assert result.data["backend"]["framework"] is None
 
 
 def test_fullstack_express_plus_react_is_fullstack():
@@ -140,9 +137,8 @@ def test_fullstack_express_plus_react_is_fullstack():
         },
     )
     result = asyncio.run(FullstackMetric().run(MetricContext(snapshot=snapshot)))
-    assert result.data["is_fullstack"] is True
-    assert result.data["repo_type"] == "fullstack"
-    assert result.data["backend_detected"]["stack_guess"] == "Express"
+    assert result.data["application_type"] == "full_stack"
+    assert result.data["backend"] == {"detected": True, "framework": "express"}
 
 
 def test_fullstack_next_api_route_counts_as_backend():
@@ -161,9 +157,9 @@ def test_fullstack_next_api_route_counts_as_backend():
         },
     )
     result = asyncio.run(FullstackMetric().run(MetricContext(snapshot=snapshot)))
-    assert result.data["frontend_detected"]["present"] is True
-    assert result.data["backend_detected"]["present"] is True
-    assert result.data["repo_type"] == "fullstack"
+    assert result.data["frontend"]["detected"] is True
+    assert result.data["backend"]["detected"] is True
+    assert result.data["application_type"] == "full_stack"
 
 
 def test_repo_health_flags_dump():
