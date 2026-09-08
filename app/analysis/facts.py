@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from app.analysis.inventory import build_inventory
 from app.analysis.manifests import parse_dependencies
 from app.analysis.structure import detect_structure
-from app.github.client import RepoSnapshot
+
+if TYPE_CHECKING:
+    from app.github.client import RepoSnapshot
 
 
 @dataclass

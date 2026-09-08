@@ -1,3 +1,1 @@
-from app.github.client import GithubClient, RepoSnapshot, parse_github_url, paths_matching
-
-__all__ = ["GithubClient", "RepoSnapshot", "parse_github_url", "paths_matching"]
+"""GitHub helpers — import from app.github.client, not this package init."""

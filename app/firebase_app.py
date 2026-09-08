@@ -11,7 +11,7 @@ _app: firebase_admin.App | None = None
 
 
 def init_firebase() -> firebase_admin.App:
-    """Initialize Firebase Admin once (SA from .env locally, ADC on Cloud Run)."""
+    """Initialize Firebase Admin once (SA from env locally, ADC on Cloud Run)."""
     global _app
     if _app is not None:
         return _app
@@ -28,15 +28,19 @@ def init_firebase() -> firebase_admin.App:
         options["databaseURL"] = settings.firebase_database_url
 
     info = settings.service_account_info()
-    if info:
-        cred = credentials.Certificate(info)
-        _app = firebase_admin.initialize_app(cred, options or None)
-    else:
-        try:
+    try:
+        if info:
+            cred = credentials.Certificate(info)
+            _app = firebase_admin.initialize_app(cred, options or None)
+        else:
             cred = credentials.ApplicationDefault()
             _app = firebase_admin.initialize_app(cred, options or None)
-        except Exception:
-            _app = firebase_admin.initialize_app(options=options or None)
+    except Exception:
+        # Last resort: ADC without explicit certificate (Cloud Run runtime SA).
+        if firebase_admin._apps:  # type: ignore[attr-defined]
+            _app = firebase_admin.get_app()
+            return _app
+        _app = firebase_admin.initialize_app(options=options or None)
     return _app
 
 

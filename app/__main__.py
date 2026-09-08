@@ -4,15 +4,13 @@ import os
 
 import uvicorn
 
-from app.config import get_settings
-
 
 def main() -> None:
-    settings = get_settings()
-    port = int(os.environ.get("PORT", settings.port))
+    host = os.environ.get("HOST", "0.0.0.0")
+    port = int(os.environ.get("PORT", "8080"))
     uvicorn.run(
         "app.main:app",
-        host=settings.host,
+        host=host,
         port=port,
         reload=False,
     )

@@ -4,22 +4,14 @@ from fastapi import FastAPI
 
 from app import __version__
 from app.api.routes import router
-from app.config import get_settings
-from app.firebase_app import init_firebase
 from app.metrics.registry import init_registry
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    # Bind-first: do not call Firebase/Vertex here. Cloud Run health-checks the
+    # listening port before the first request; a hung Google client would fail deploy.
     init_registry()
-    settings = get_settings()
-    # Firebase optional at import-time for unit tests; init when project/SA is configured
-    if settings.resolved_project_id or settings.service_account_info():
-        try:
-            init_firebase()
-        except Exception:
-            # Allow boot without credentials for /health + /metrics in CI
-            pass
     yield
 
 

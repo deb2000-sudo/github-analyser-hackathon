@@ -17,9 +17,11 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 COPY pyproject.toml uv.lock README.md ./
 COPY app ./app
+COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 
-RUN uv sync --frozen --no-dev --no-editable
+RUN uv sync --frozen --no-dev --no-editable \
+    && chmod +x /app/docker-entrypoint.sh
 
 EXPOSE 8080
 
-CMD ["uv", "run", "--no-sync", "python", "-m", "app"]
+CMD ["/app/docker-entrypoint.sh"]

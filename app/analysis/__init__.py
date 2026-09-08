@@ -1,4 +1,9 @@
-from app.analysis.facts import CodeFacts, build_code_facts
+"""Static analysis helpers.
+
+Keep this package init import-light. github.client imports MANIFEST_NAMES
+from app.analysis.manifests; importing facts here would create a circular import.
+"""
+
 from app.analysis.manifests import MANIFEST_NAMES
 
-__all__ = ["CodeFacts", "MANIFEST_NAMES", "build_code_facts"]
+__all__ = ["MANIFEST_NAMES"]
