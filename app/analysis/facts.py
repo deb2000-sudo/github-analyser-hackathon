@@ -1,6 +1,6 @@
-"""GitHub URL → repository → filtered files → languages → manifests → inventory → source facts.
+"""GitHub URL → repository → filtered files → languages → manifests → inventory → source facts → call graph.
 
-Phase 3 adds normalized source facts. Call graph and data flow are not built here.
+Phase 6 adds a basic CALLS graph. Data flow is not built here.
 """
 
 from __future__ import annotations
@@ -9,6 +9,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
+from app.analysis.call_graph import CallGraph, build_call_graph
 from app.analysis.extract import extract_source_facts
 from app.analysis.inventory import FileInventory, build_inventory
 from app.analysis.manifests import parse_dependencies
@@ -33,6 +34,7 @@ class CodeFacts:
     file_inventory: FileInventory
     source_facts: list[dict[str, Any]]
     parse_warnings: list[dict[str, Any]]
+    call_graph: CallGraph
 
     def to_public_dict(self) -> dict[str, Any]:
         """Job result.analysis — normalized facts only, no AST / Tree-sitter nodes."""
@@ -60,6 +62,7 @@ class CodeFacts:
                 "facts": self.source_facts[:_MAX_PUBLIC_FACTS],
                 "truncated": truncated,
             },
+            "call_graph": self.call_graph.to_public_dict(),
         }
 
     def summary(self) -> dict[str, Any]:
@@ -72,6 +75,8 @@ class CodeFacts:
             "python_top": (self.manifests.get("python") or [])[:20],
             "source_fact_count": len(self.source_facts),
             "parse_warning_count": len(self.parse_warnings),
+            "call_graph_nodes": self.call_graph.graph.number_of_nodes(),
+            "call_graph_edges": self.call_graph.graph.number_of_edges(),
         }
 
 
@@ -124,6 +129,7 @@ def build_code_facts(snapshot: RepoSnapshot) -> CodeFacts:
         contents,
         file_inventory=file_inventory,
     )
+    call_graph = build_call_graph(source_facts)
     return CodeFacts(
         repository=repository,
         filtered_files=files,
@@ -134,4 +140,5 @@ def build_code_facts(snapshot: RepoSnapshot) -> CodeFacts:
         file_inventory=file_inventory,
         source_facts=source_facts,
         parse_warnings=parse_warnings,
+        call_graph=call_graph,
     )
