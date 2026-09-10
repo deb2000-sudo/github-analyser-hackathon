@@ -242,7 +242,9 @@ def enrich_metrics_for_scoring(metrics: dict[str, Any], snapshot: Any | None = N
     enriched = {k: dict(v) if isinstance(v, dict) else v for k, v in metrics.items()}
 
     ai = dict(enriched.get("ai_usage") or {})
-    if snapshot is not None:
+    # Phase 8 evidence levels already identify providers. Do not re-scan
+    # README keywords and treat mentions as live LLM usage.
+    if snapshot is not None and "integration_level" not in ai:
         ai["llm_providers"] = detect_llm_providers(
             ai.get("ai_dependencies_found") or [],
             getattr(snapshot, "file_contents", {}) or {},

@@ -192,6 +192,8 @@ def test_ai_usage_skips_llm_when_no_deps():
     result = asyncio.run(AiUsageMetric().run(MetricContext(snapshot=snapshot)))
     assert result.data["ai_integration_type"] == "none"
     assert result.data["ai_dependencies_found"] == []
+    assert result.data["integration_level"] == 0
+    assert result.data["detected"] is False
 
 
 def test_prompt_only_includes_requested_sections():

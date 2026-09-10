@@ -85,8 +85,10 @@ def test_build_code_facts_pipeline_with_source_facts():
         "inventory",
         "source_facts",
         "call_graph",
+        "data_flow",
     }
     assert "node_count" in public["call_graph"]
+    assert "node_count" in public["data_flow"]
     assert "ast" not in public
     assert public["source_facts"]["counts"].get("import", 0) >= 1
     assert public["source_facts"]["counts"].get("function_call", 0) >= 1

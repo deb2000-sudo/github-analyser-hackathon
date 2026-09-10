@@ -1,6 +1,6 @@
 """GitHub URL → repository → filtered files → languages → manifests → inventory → source facts → call graph.
 
-Phase 6 adds a basic CALLS graph. Data flow is not built here.
+Phase 7 adds simple value flow. AI-specific classification is not built here.
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
 from app.analysis.call_graph import CallGraph, build_call_graph
+from app.analysis.data_flow import DataFlowGraph, build_data_flow
 from app.analysis.extract import extract_source_facts
 from app.analysis.inventory import FileInventory, build_inventory
 from app.analysis.manifests import parse_dependencies
@@ -35,6 +36,7 @@ class CodeFacts:
     source_facts: list[dict[str, Any]]
     parse_warnings: list[dict[str, Any]]
     call_graph: CallGraph
+    data_flow: DataFlowGraph
 
     def to_public_dict(self) -> dict[str, Any]:
         """Job result.analysis — normalized facts only, no AST / Tree-sitter nodes."""
@@ -63,6 +65,7 @@ class CodeFacts:
                 "truncated": truncated,
             },
             "call_graph": self.call_graph.to_public_dict(),
+            "data_flow": self.data_flow.to_public_dict(),
         }
 
     def summary(self) -> dict[str, Any]:
@@ -77,6 +80,8 @@ class CodeFacts:
             "parse_warning_count": len(self.parse_warnings),
             "call_graph_nodes": self.call_graph.graph.number_of_nodes(),
             "call_graph_edges": self.call_graph.graph.number_of_edges(),
+            "data_flow_nodes": self.data_flow.graph.number_of_nodes(),
+            "data_flow_edges": self.data_flow.graph.number_of_edges(),
         }
 
 
@@ -130,6 +135,7 @@ def build_code_facts(snapshot: RepoSnapshot) -> CodeFacts:
         file_inventory=file_inventory,
     )
     call_graph = build_call_graph(source_facts)
+    data_flow = build_data_flow(source_facts)
     return CodeFacts(
         repository=repository,
         filtered_files=files,
@@ -141,4 +147,5 @@ def build_code_facts(snapshot: RepoSnapshot) -> CodeFacts:
         source_facts=source_facts,
         parse_warnings=parse_warnings,
         call_graph=call_graph,
+        data_flow=data_flow,
     )

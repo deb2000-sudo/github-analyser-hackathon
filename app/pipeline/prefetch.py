@@ -107,8 +107,7 @@ def resolve_llm_metrics(
     if not llm_enabled:
         return []
     out: list[str] = []
-    if "ai_usage" in requested:
-        out.append("ai_usage")
+    # ai_usage is Code Facts evidence levels — do not ask Gemini to detect SDKs.
     if "agent_analysis" in requested:
         out.append("agent_analysis")
     if "solution_fit" in requested and has_evaluation_context:
