@@ -10,6 +10,8 @@ from app.analysis.ai_evidence import (
     integration_type_from_evidence,
     llm_providers_from_evidence,
 )
+from app.analysis.ai_fake import detect_fake_ai
+from app.analysis.ai_flow import analyze_ai_flow
 from app.analysis.facts import build_code_facts
 from app.metrics.ai_imports import reconcile_ai_dependencies, scan_manifests
 from app.metrics.ai_packages import is_agent_framework
@@ -22,9 +24,8 @@ class AiUsageMetric(Metric):
     name = "ai_usage"
     tier = "static"
     description = (
-        "Detects AI providers from Code Facts using evidence levels 0–4 "
-        "(mention, dependency, SDK import/client, model invocation). "
-        "Does not use Gemini to find SDK calls."
+        "Detects AI providers, verifies user→model and model→sink flow, and "
+        "flags implementations that appear AI-powered but do not meaningfully use AI."
     )
     default_options = {"min_confidence": "medium", "max_evidence_files": 12}
     skippable_when = "no AI mention, dependency, import, or invocation"
@@ -38,6 +39,12 @@ class AiUsageMetric(Metric):
             "import_detected": {"type": "boolean"},
             "client_detected": {"type": "boolean"},
             "model_invocation_detected": {"type": "boolean"},
+            "user_input_reaches_model": {"type": "boolean"},
+            "model_output_used": {"type": "boolean"},
+            "input_flow_evidence": {"type": "array"},
+            "output_flow_evidence": {"type": "array"},
+            "ai_verification": {"type": "object"},
+            "ai_findings": {"type": "array"},
             "ai_dependencies_found": {"type": "array", "items": {"type": "string"}},
             "ai_integration_type": {"type": "string", "enum": ["none", "wrapper", "rag", "agentic"]},
             "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
@@ -89,6 +96,18 @@ class AiUsageMetric(Metric):
                     integration = guessed
 
         llm_providers = llm_providers_from_evidence(evidence)
+        verification = analyze_ai_flow(
+            getattr(facts, "source_facts", None) or [],
+            getattr(facts, "call_graph", None),
+            getattr(facts, "data_flow", None),
+        )
+        findings = detect_fake_ai(
+            getattr(facts, "source_facts", None) or [],
+            evidence=evidence,
+            verification=verification,
+            call_graph=getattr(facts, "call_graph", None),
+            manifests=ctx.snapshot.package_manifests,
+        )
         diagnostics = {
             "manifest_deps_raw": reconciled["manifest_deps_raw"],
             "manifest_only_deps": reconciled["manifest_only_deps"],
@@ -96,7 +115,7 @@ class AiUsageMetric(Metric):
             "code_evidence_by_package": reconciled["code_evidence_by_package"],
         }
         evidence_files = evidence.evidence_files[: int(ctx.options.get("max_evidence_files") or 12)]
-        reasoning = _reasoning(evidence, llm_providers)
+        reasoning = _reasoning(evidence, llm_providers, verification, findings)
 
         return MetricResult(
             name=self.name,
@@ -110,6 +129,12 @@ class AiUsageMetric(Metric):
                 "agent_frameworks_found": agent_deps,
                 "llm_providers": llm_providers,
                 "reasoning": reasoning,
+                "user_input_reaches_model": verification["user_input_reaches_model"],
+                "model_output_used": verification["model_output_used"],
+                "input_flow_evidence": verification["input_flow_evidence"],
+                "output_flow_evidence": verification["output_flow_evidence"],
+                "ai_verification": verification,
+                "ai_findings": findings,
                 **diagnostics,
             },
         )
@@ -128,24 +153,37 @@ def _code_hits_from_evidence(evidence: AiEvidence) -> dict[str, list[str]]:
     return hits
 
 
-def _reasoning(evidence: AiEvidence, llm_providers: dict[str, Any]) -> str:
+def _reasoning(
+    evidence: AiEvidence,
+    llm_providers: dict[str, Any],
+    verification: dict[str, Any] | None = None,
+    findings: list[dict[str, Any]] | None = None,
+) -> str:
+    verification = verification or {}
+    failed = [f.get("rule_id") for f in (findings or []) if f.get("status") == "failed"]
     if evidence.integration_level == 0:
-        return "No AI mention, dependency, SDK import, or model invocation in scanned facts."
-    if evidence.integration_level == 1:
+        base = "No AI mention, dependency, SDK import, or model invocation in scanned facts."
+    elif evidence.integration_level == 1:
         names = ", ".join(evidence.providers) or "AI"
-        return f"Level 1: {names} mentioned in README/UI/context only."
-    if evidence.integration_level == 2:
-        return (
+        base = f"Level 1: {names} mentioned in README/UI/context only."
+    elif evidence.integration_level == 2:
+        base = (
             "Level 2: AI dependency declared "
             f"({', '.join(evidence.packages[:5]) or 'unknown'}) but no SDK import or invocation."
         )
-    if evidence.integration_level == 3:
+    elif evidence.integration_level == 3:
         kind = "client" if evidence.client_detected else "import"
-        return f"Level 3: AI SDK {kind} exists ({', '.join(evidence.providers)}); no model invocation found."
-    return (
-        f"Level 4: model invocation found for {', '.join(evidence.providers)}. "
-        "User-input flow is not classified here."
-    ) or str(llm_providers.get("reasoning") or "")
+        base = f"Level 3: AI SDK {kind} exists ({', '.join(evidence.providers)}); no model invocation found."
+    else:
+        user_in = verification.get("user_input_reaches_model")
+        output_used = verification.get("model_output_used")
+        base = (
+            f"Level 4: model invocation found for {', '.join(evidence.providers)}. "
+            f"user_input_reaches_model={user_in}; model_output_used={output_used}."
+        )
+    if failed:
+        return f"{base} Fake-AI findings: {', '.join(failed)}."
+    return base or str(llm_providers.get("reasoning") or "")
 
 
 # Re-export for pipeline / tests

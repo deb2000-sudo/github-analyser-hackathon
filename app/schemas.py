@@ -26,8 +26,16 @@ class RubricDefinition(BaseModel):
     metric: str | None = None
 
 
+class AiEvidenceScoringConfig(BaseModel):
+    """Optional overrides for the 0–100 AI integration evidence scale."""
+
+    points: dict[str, int] | None = None
+    penalties: dict[str, int] | None = None
+
+
 class ScoringConfig(BaseModel):
     rubrics: list[RubricDefinition] | None = None
+    ai_evidence: AiEvidenceScoringConfig | None = None
 
 
 class SubmissionContext(BaseModel):

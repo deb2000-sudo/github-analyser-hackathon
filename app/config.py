@@ -52,6 +52,10 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("GEMINI_MODEL", "VERTEX_MODEL"),
     )
     vertex_enabled: bool = True
+    llm_confidence_threshold: float = Field(
+        default=0.75,
+        validation_alias=AliasChoices("LLM_CONFIDENCE_THRESHOLD"),
+    )
 
     github_token: str | None = None
     hackathon_start: str | None = None

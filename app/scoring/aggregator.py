@@ -4,6 +4,7 @@ from typing import Any
 
 from app.analysis.frameworks import BACKEND_DISPLAY, FRONTEND_DISPLAY
 from app.github.validation import RepoAccessInfo, access_payload
+from app.scoring.ai_evidence import has_deterministic_ai_signals, score_ai_integration
 from app.scoring.llm_providers import detect_llm_providers
 from app.scoring.readme_quality import analyze_readme, find_readme_content
 from app.scoring.rubrics import resolve_rubrics
@@ -66,6 +67,17 @@ def _score_fullstack(metrics: dict[str, Any], max_score: float) -> tuple[float, 
 
 def _score_ai_usage(metrics: dict[str, Any], max_score: float) -> tuple[float, str]:
     data = metrics.get("ai_usage") or {}
+    if has_deterministic_ai_signals(data):
+        breakdown = score_ai_integration(metrics, point_overrides=metrics.get("_ai_evidence_points"))
+        ratio = float(breakdown["ai_integration_score"]) / 100.0
+        score = _clamp(max_score * ratio, max_score)
+        explanation = breakdown["explanation"]
+        return score, (
+            f"Uses an LLM (20% weight): {explanation} "
+            f"Awarded {score:.1f}/{max_score} from deterministic integration evidence, "
+            f"not package presence alone."
+        ).strip()
+
     llm_info = data.get("llm_providers") or data.get("gemini") or {}
     uses_llm = bool(llm_info.get("uses_llm") or llm_info.get("uses_gemini"))
     provider_names = llm_info.get("provider_names") or []
@@ -302,6 +314,8 @@ def aggregate_scores(
     rubrics = resolve_rubrics(request_scoring=request_scoring)
     max_total = sum(float(r.get("weight") or 0) for r in rubrics)
     scored_metrics = enrich_metrics_for_scoring(metrics, snapshot)
+    if request_scoring and request_scoring.get("ai_evidence"):
+        scored_metrics["_ai_evidence_points"] = request_scoring["ai_evidence"]
 
     if access and not access.is_public:
         reason = gate_reason or access.reason or "repository_not_accessible"
@@ -323,14 +337,32 @@ def aggregate_scores(
             "total_score": 0.0,
             "max_total_score": max_total,
             "rubrics": rubric_rows,
+            "ai_integration": {
+                "ai_integration_score": 0,
+                "positive_evidence": [],
+                "penalties": [],
+                "classification": "no_ai",
+                "explanation": "Repository is not accessible — AI integration not scored.",
+            },
         }
 
     rubric_rows = [score_metric_rubric(r, scored_metrics) for r in rubrics]
     total = sum(row["weighted_score"] for row in rubric_rows)
+    ai_integration = score_ai_integration(
+        scored_metrics,
+        point_overrides=(request_scoring or {}).get("ai_evidence"),
+    )
     return {
         "total_score": round(total, 2),
         "max_total_score": max_total,
         "rubrics": rubric_rows,
+        "ai_integration": {
+            "ai_integration_score": ai_integration["ai_integration_score"],
+            "positive_evidence": ai_integration["positive_evidence"],
+            "penalties": ai_integration["penalties"],
+            "classification": ai_integration["classification"],
+            "explanation": ai_integration["explanation"],
+        },
     }
 
 

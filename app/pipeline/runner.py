@@ -3,22 +3,19 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from app.analysis.evidence_aggregator import EvidenceAggregator
 from app.analysis.facts import build_code_facts
 from app.config import get_settings
 from app.github.client import GithubClient
 from app.github.validation import access_payload
 from app.jobs import Job, JobStatus, JobStore
 from app.llm.client import LLMClient
+from app.llm.reasoner import LLMReasoner, ReasoningRequest
+from app.llm.selective import build_evidence_pack, decide_llm_use
 from app.metrics.ai_usage import scan_manifests
 from app.metrics.base import MetricContext
 from app.metrics.registry import get_metric
-from app.metrics.solution_fit import _prior_summaries
-from app.pipeline.prefetch import (
-    collect_llm_files,
-    collect_prefetch_paths,
-    resolve_llm_metrics,
-)
-from app.pipeline.prompt import build_system_prompt, build_user_prompt
+from app.pipeline.prefetch import collect_prefetch_paths
 from app.scoring.aggregator import aggregate_scores, build_gated_result
 
 PIPELINE_ORDER = [
@@ -92,18 +89,11 @@ async def run_pipeline(job_id: str) -> None:
         code_facts = build_code_facts(snapshot)
         analysis_payload = code_facts.to_public_dict()
 
-        llm_metrics = resolve_llm_metrics(
-            requested,
-            ai_deps=ai_deps,
-            agent_deps=agent_deps,
-            has_evaluation_context=bool((submission_context.get("provided_context") or "").strip()),
-            llm_enabled=llm.enabled,
-        )
-
         to_run = list(dict.fromkeys([*requested, "repo_health"]))
         ordered = [m for m in PIPELINE_ORDER if m in to_run]
-        static_first = [m for m in ordered if m not in llm_metrics]
-        llm_after = [m for m in ordered if m in llm_metrics]
+        llm_candidates = [m for m in ("agent_analysis", "solution_fit") if m in ordered]
+        static_first = [m for m in ordered if m not in llm_candidates]
+        llm_after = [m for m in ordered if m in llm_candidates]
 
         results: dict[str, Any] = {}
         ctx = MetricContext(
@@ -135,29 +125,36 @@ async def run_pipeline(job_id: str) -> None:
                 results[name]["skip_reason"] = result.reason
             ctx.prior_results = results
 
+        llm_plan = decide_llm_use(
+            requested=requested,
+            llm_enabled=llm.enabled,
+            static_metrics=results,
+            submission_context=submission_context,
+            code_facts=code_facts,
+            agent_deps=agent_deps,
+            confidence_threshold=settings.llm_confidence_threshold,
+        )
+        ctx.extras["llm_plan"] = llm_plan
         llm_judgment: dict[str, Any] = {}
-        if llm_metrics:
-            files = collect_llm_files(
-                snapshot,
-                llm_metrics,
-                options,
-                ai_deps=ai_deps,
-                agent_deps=agent_deps,
+        if llm_plan.should_run:
+            evidence_pack = build_evidence_pack(
+                code_facts=code_facts,
+                snapshot=snapshot,
+                static_metrics=results,
+                plan=llm_plan,
             )
-            hints: dict[str, Any] = {
-                "ai_dependencies_found": ai_deps,
-                "agent_frameworks_found": agent_deps,
-            }
-            if "solution_fit" in llm_metrics:
-                hints["prior_metric_summaries"] = _prior_summaries(results)
+            ctx.extras["llm_evidence_pack"] = evidence_pack
             llm_judgment = await combined_llm_judgment(
                 llm,
-                llm_metrics,
-                files,
-                hints,
-                submission_context,
+                ReasoningRequest(
+                    metrics=llm_plan.metrics,
+                    questions=llm_plan.questions,
+                    evidence=evidence_pack,
+                    submission_context=submission_context,
+                    reasons=llm_plan.reasons,
+                ),
             )
-            ctx.extras["llm_judgment"] = llm_judgment
+        ctx.extras["llm_judgment"] = llm_judgment
 
         for name in llm_after:
             metric = get_metric(name)
@@ -177,9 +174,12 @@ async def run_pipeline(job_id: str) -> None:
             access=access,
             snapshot=snapshot,
         )
+        verdict = EvidenceAggregator().aggregate(metrics=results, code_facts=code_facts)
+        analysis_payload["verdict"] = verdict
         result_payload = {
             "access": access_payload(access),
             "scoring": scoring,
+            "verdict": verdict,
             "repo": {
                 "owner": snapshot.ref.owner,
                 "name": snapshot.ref.name,
@@ -208,18 +208,8 @@ async def run_pipeline(job_id: str) -> None:
 
 
 async def combined_llm_judgment(
-    llm: LLMClient,
-    metrics: list[str],
-    files: dict[str, str],
-    hints: dict[str, Any],
-    submission_context: dict[str, Any] | None = None,
+    reasoner: LLMReasoner,
+    request: ReasoningRequest,
 ) -> dict[str, Any]:
-    """Single Gemini call for all LLM metrics (was 3 sequential calls)."""
-    system = build_system_prompt(metrics)
-    user = build_user_prompt(
-        metrics=metrics,
-        files=files,
-        hints=hints,
-        submission_context=submission_context,
-    )
-    return await llm.judge_json(system=system, user=user)
+    """Single selective Gemini call over a curated evidence pack."""
+    return await reasoner.reason(request)

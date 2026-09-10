@@ -702,3 +702,32 @@ def confidence_from_level(level: int) -> str:
     if level in {LEVEL_NONE, LEVEL_MENTION, LEVEL_INVOCATION}:
         return "high"
     return "medium"
+
+
+def list_model_invocations(source_facts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Function-call facts that match provider-specific model invocation rules."""
+    scratch: dict[str, ProviderEvidence] = {}
+    file_imports = _collect_file_imports(source_facts, scratch)
+    found: list[dict[str, Any]] = []
+    for item in source_facts:
+        if item.get("fact_type") != "function_call":
+            continue
+        file = str(item.get("file") or "")
+        callee = str(item.get("callee") or "")
+        if not callee:
+            continue
+        imported = file_imports.get(file) or {"providers": set(), "name_to_provider": {}}
+        providers = sorted(_invocation_providers(callee, imported))
+        if not providers:
+            continue
+        found.append(
+            {
+                "file": file,
+                "line": item.get("line"),
+                "scope": str(item.get("scope") or ""),
+                "callee": callee,
+                "arguments": list(item.get("arguments") or []),
+                "providers": providers,
+            }
+        )
+    return found

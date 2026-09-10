@@ -3,9 +3,9 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from app.llm.client import LLMClient
+from app.llm.reasoner import LLMReasoner, ReasoningRequest
+from app.llm.selective import LlmPlan, build_evidence_pack, decide_llm_use
 from app.metrics.base import Metric, MetricContext, MetricResult
-from app.pipeline.prompt import build_system_prompt, build_user_prompt
 from app.metrics.solution_fit_normalize import normalize_solution_fit
 from app.scoring.readme_quality import analyze_readme, find_readme_content
 
@@ -123,7 +123,15 @@ class SolutionFitMetric(Metric):
                 reason="missing_submission_context",
             )
 
-        llm: LLMClient | None = ctx.extras.get("llm_client")
+        precomputed = (ctx.extras.get("llm_judgment") or {}).get("solution_fit")
+        if precomputed:
+            return MetricResult(
+                name=self.name,
+                status="ok",
+                data=self._build_data(precomputed, ctx.snapshot),
+            )
+
+        llm: LLMReasoner | None = ctx.extras.get("llm_client")
         if not llm or not llm.enabled:
             return MetricResult(
                 name=self.name,
@@ -148,26 +156,38 @@ class SolutionFitMetric(Metric):
                 ctx.snapshot, candidates, max_file_kb=int(opts.get("max_file_kb", 40))
             )
 
-        files = {p: ctx.snapshot.file_contents[p] for p in candidates if p in ctx.snapshot.file_contents}
-        tree_summary = "\n".join(t["path"] for t in ctx.snapshot.tree[:150])
-        files = {"__repo_tree__.txt": tree_summary, **files}
-
-        precomputed = (ctx.extras.get("llm_judgment") or {}).get("solution_fit")
-        if precomputed:
-            return MetricResult(
-                name=self.name,
-                status="ok",
-                data=self._build_data(precomputed, ctx.snapshot),
+        plan: LlmPlan | None = ctx.extras.get("llm_plan")
+        if plan is None:
+            plan = decide_llm_use(
+                requested=["solution_fit"],
+                llm_enabled=True,
+                static_metrics=ctx.prior_results,
+                submission_context=submission,
+                code_facts=ctx.extras.get("code_facts"),
             )
+        pack = ctx.extras.get("llm_evidence_pack")
+        if pack is None:
+            pack = build_evidence_pack(
+                code_facts=ctx.extras.get("code_facts"),
+                snapshot=ctx.snapshot,
+                static_metrics=ctx.prior_results,
+                plan=plan,
+            )
+        if "prior_metric_summaries" not in pack:
+            pack = {**pack, "prior_metric_summaries": _prior_summaries(ctx.prior_results)}
 
-        system = build_system_prompt(["solution_fit"])
-        user = build_user_prompt(
-            metrics=["solution_fit"],
-            files=files,
-            hints={"prior_metric_summaries": _prior_summaries(ctx.prior_results)},
-            submission_context=submission,
+        judgment = await llm.reason(
+            ReasoningRequest(
+                metrics=["solution_fit"],
+                questions=plan.questions
+                or [
+                    "Does repository implementation meaningfully fit the provided hackathon problem statement?"
+                ],
+                evidence=pack,
+                submission_context=submission,
+                reasons=plan.reasons,
+            )
         )
-        judgment = await llm.judge_json(system=system, user=user)
         section = judgment.get("solution_fit") or judgment
         return MetricResult(name=self.name, status="ok", data=self._build_data(section, ctx.snapshot))
 

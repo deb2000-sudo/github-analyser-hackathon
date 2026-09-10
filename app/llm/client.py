@@ -6,10 +6,11 @@ import re
 from typing import Any
 
 from app.config import Settings, get_settings
+from app.llm.reasoner import LLMReasoner, ReasoningRequest
 
 
-class LLMClient:
-    """Vertex AI Gemini judge — returns structured JSON."""
+class LLMClient(LLMReasoner):
+    """Vertex AI Gemini implementation of LLMReasoner — structured JSON only."""
 
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or get_settings()
@@ -30,6 +31,18 @@ class LLMClient:
     @property
     def enabled(self) -> bool:
         return self._client is not None
+
+    async def reason(self, request: ReasoningRequest) -> dict[str, Any]:
+        from app.pipeline.prompt import build_system_prompt, build_user_prompt
+
+        system = build_system_prompt(request.metrics, questions=request.questions)
+        user = build_user_prompt(
+            metrics=request.metrics,
+            evidence_pack=request.evidence,
+            questions=request.questions,
+            submission_context=request.submission_context,
+        )
+        return await self.judge_json(system=system, user=user)
 
     async def judge_json(self, *, system: str, user: str) -> dict[str, Any]:
         if not self._client:

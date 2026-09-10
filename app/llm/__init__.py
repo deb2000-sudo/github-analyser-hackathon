@@ -1,3 +1,6 @@
 from app.llm.client import LLMClient
+from app.llm.reasoner import LLMReasoner, ReasoningRequest
 
-__all__ = ["LLMClient"]
+GeminiReasoner = LLMClient
+
+__all__ = ["GeminiReasoner", "LLMClient", "LLMReasoner", "ReasoningRequest"]

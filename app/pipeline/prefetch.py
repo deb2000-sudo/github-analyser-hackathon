@@ -80,18 +80,23 @@ def collect_llm_files(
     ai_deps: list[str],
     agent_deps: list[str],
 ) -> dict[str, str]:
-    """Build the file bundle for a single combined Gemini call."""
+    """Small evidence-file snippets only. Never the entire repository."""
+    del llm_metrics
     paths = collect_prefetch_paths(
         snapshot,
-        llm_metrics,
+        ["ai_usage", "agent_analysis"],
         options,
         ai_deps=ai_deps,
         agent_deps=agent_deps,
     )
-    files = {p: snapshot.file_contents[p] for p in paths if p in snapshot.file_contents}
-    if "solution_fit" in llm_metrics:
-        tree_summary = "\n".join(t["path"] for t in snapshot.tree[:150])
-        files = {"__repo_tree__.txt": tree_summary, **files}
+    files: dict[str, str] = {}
+    for path in paths:
+        content = snapshot.file_contents.get(path)
+        if not content:
+            continue
+        files[path] = content if len(content) <= 4000 else content[:4000] + "\n…[truncated]…"
+        if len(files) >= 8:
+            break
     return files
 
 
@@ -102,14 +107,27 @@ def resolve_llm_metrics(
     agent_deps: list[str],
     has_evaluation_context: bool,
     llm_enabled: bool,
+    static_metrics: dict[str, Any] | None = None,
+    code_facts: Any | None = None,
+    submission_context: dict[str, Any] | None = None,
+    confidence_threshold: float | None = None,
 ) -> list[str]:
-    del ai_deps, agent_deps  # agent_analysis always runs when requested
-    if not llm_enabled:
-        return []
-    out: list[str] = []
-    # ai_usage is Code Facts evidence levels — do not ask Gemini to detect SDKs.
-    if "agent_analysis" in requested:
-        out.append("agent_analysis")
-    if "solution_fit" in requested and has_evaluation_context:
-        out.append("solution_fit")
-    return out
+    """Sections Gemini may answer. Empty when no semantic work is required."""
+    from app.llm.selective import DEFAULT_CONFIDENCE_THRESHOLD, decide_llm_use
+
+    context = dict(submission_context or {})
+    if has_evaluation_context and not (context.get("provided_context") or "").strip():
+        context["provided_context"] = "provided"
+    plan = decide_llm_use(
+        requested=requested,
+        llm_enabled=llm_enabled,
+        static_metrics=static_metrics,
+        submission_context=context,
+        code_facts=code_facts,
+        agent_deps=agent_deps,
+        confidence_threshold=(
+            DEFAULT_CONFIDENCE_THRESHOLD if confidence_threshold is None else confidence_threshold
+        ),
+    )
+    del ai_deps
+    return plan.metrics
