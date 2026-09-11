@@ -16,9 +16,11 @@ AI_USAGE_SECTION = '''
 
 AGENT_ANALYSIS_SECTION = '''
 "agent_analysis": {
+  "classification": "NO_AGENT" | "LLM_WRAPPER" | "LINEAR_CHAIN" | "TOOL_USING_LLM" | "WORKFLOW_ORCHESTRATION" | "GENUINE_AGENT_ORCHESTRATION",
   "agent_count": int,
-  "agents": [ { "role_guess": string, "file": string, "evidence": string } ],
+  "agents": [ { "role_guess": string, "file": string, "evidence": string, "evidence_ids": [string] } ],
   "has_real_orchestration": bool,
+  "evidence_ids": [string],
   "confidence": "low" | "medium" | "high",
   "reasoning": string
 }
@@ -26,11 +28,16 @@ AGENT_ANALYSIS_SECTION = '''
 
 SOLUTION_FIT_SECTION = '''
 "solution_fit": {
-  "context_relevant": bool,    // false if repo is a different product/domain than PROJECT CONTEXT
-  "relevance_score": number,   // 0-10 how relevant the repo is to PROJECT CONTEXT (0 = unrelated)
-  "alignment_score": number,   // 0-10 how well code implements PROJECT CONTEXT (must be 0 if context_relevant is false)
-  "implements_claimed_solution": bool,  // true only if repo actually builds what PROJECT CONTEXT describes
-  "context_requirements_met": [ { "requirement": string, "met": bool, "evidence": string } ],
+  "context_relevant": bool,
+  "relevance_score": number,
+  "alignment_score": number,
+  "implements_claimed_solution": bool,
+  "implementation_matches_claim": bool,
+  "verified_features": [ { "feature": string, "evidence_ids": [string], "note": string } ],
+  "unsupported_features": [ { "feature": string, "evidence_ids": [string], "note": string } ],
+  "partial_features": [ { "feature": string, "evidence_ids": [string], "note": string } ],
+  "context_requirements_met": [ { "requirement": string, "met": bool, "evidence": string, "evidence_ids": [string] } ],
+  "evidence_ids": [string],
   "readme_quality_score": number,
   "readme_has_local_setup": bool,
   "readme_reasoning": string,
@@ -126,17 +133,23 @@ Rules:
   provided facts — do not claim a provider that deterministic findings did not list.
 - Frontend files that only call a backend /api for AI scoring are "wrapper" — not agentic —
   unless agent orchestration evidence is present.
-- has_real_orchestration is true only if there is actual handoff/planning/tool-routing logic,
-  not just multiple classes named "Agent".
+- For agent classification: classify using ONLY the supplied deterministic agent evidence.
+  Do not classify as an agent merely because "langchain", "langgraph", or "agent"
+  appears in dependencies or README. Those strings are naming/manifest hints only.
+  Every classification MUST cite evidence_ids from the pack. Without graph edges,
+  tool registrations, or orchestration loops, do not choose GENUINE_AGENT_ORCHESTRATION
+  or WORKFLOW_ORCHESTRATION. A single model call is LLM_WRAPPER. Prompt|LLM|parser
+  is LINEAR_CHAIN. bind_tools / @tool without a control loop is TOOL_USING_LLM.
+  has_real_orchestration is true only for WORKFLOW_ORCHESTRATION or GENUINE_AGENT_ORCHESTRATION.
 - For solution_fit — STRICT rules:
-  1. Read ONLY the PROJECT CONTEXT paragraph (ignore any "Judging rubrics" list — those are scored elsewhere).
-  2. Ask: "Is this repository actually building the product described in PROJECT CONTEXT?"
-     If it is a different product/domain (e.g. monitoring tool vs study planner), set context_relevant=false,
-     relevance_score=0, alignment_score=0, implements_claimed_solution=false.
-  3. context_requirements_met: extract 3-5 concrete requirements FROM PROJECT CONTEXT only, then check each against evidence.
-  4. alignment_score measures implementation of PROJECT CONTEXT — NOT README quality, NOT generic code quality.
-  5. Do not give alignment_score above 2 unless the repo's stated purpose matches PROJECT CONTEXT domain.
-  6. README fields are separate — do not inflate alignment_score because README is well written.
+  1. Compare PROJECT CONTEXT (claimed project) to the implementation evidence pack only.
+  2. Ask: "Does the implementation match the claimed project?"
+     If a different product/domain, set context_relevant=false, scores 0,
+     implements_claimed_solution=false, implementation_matches_claim=false.
+  3. List verified / unsupported / partial claimed features with evidence_ids.
+  4. alignment_score measures implementation of PROJECT CONTEXT — NOT README quality.
+  5. Do not give alignment_score above 2 unless implementation evidence matches the claim domain.
+  6. README is a short untrusted summary — do not treat it as proof of features.
 """
 
 

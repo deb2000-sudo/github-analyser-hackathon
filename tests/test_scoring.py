@@ -40,6 +40,13 @@ def test_build_gated_result_structure():
     assert result["access"]["is_public"] is False
     assert result["scoring"]["total_score"] == 0.0
     assert result["metrics"] == {}
+    assert result["repository"]["full_name"] == "o/r"
+    assert result["repo"]["github_url"] == "https://github.com/o/r"
+    assert result["evidence"] == []
+    assert result["limitations"]
+    assert result["ai"]["classification"] == "not_analyzed"
+    assert result["frontend_backend"]["connected"] is None
+    assert result["metadata"]["gated"] is True
 
 
 def test_fullstack_rubric_full_score():

@@ -425,27 +425,12 @@ class FullstackMetric(Metric):
     }
 
     async def run(self, ctx: MetricContext) -> MetricResult:
+        from app.analysis.context import get_analysis
         from app.analysis.frameworks import classify_application
-        from app.analysis.inventory import FileInventory
-        from app.analysis.manifests import PHASE2_MANIFESTS
 
-        facts = ctx.extras.get("code_facts")
-        if facts is not None and getattr(facts, "file_inventory", None) is not None:
-            inventory = facts.file_inventory
-        else:
-            inventory = FileInventory.from_tree(list(ctx.snapshot.tree or []))
-
-        paths = inventory.paths or [t["path"] for t in ctx.snapshot.tree]
-        gh = ctx.extras.get("github_client")
-        core = select_core_paths(paths)
-        for entry in inventory.files_named(*PHASE2_MANIFESTS, "README.md", "README", "readme.md"):
-            if entry.path not in core:
-                core.append(entry.path)
-        if gh is not None and core and not ctx.extras.get("skip_file_fetch"):
-            try:
-                await gh.fetch_files(ctx.snapshot, core)
-            except Exception:
-                pass
+        analysis = get_analysis(ctx)
+        inventory = analysis.file_inventory or analysis.code_facts.file_inventory
+        # Prefetch happens once in the pipeline. This metric does not fetch the repo.
 
         contents = dict(ctx.snapshot.file_contents)
         for path, content in (ctx.snapshot.package_manifests or {}).items():

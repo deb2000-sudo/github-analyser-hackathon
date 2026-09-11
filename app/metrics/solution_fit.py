@@ -3,8 +3,13 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from app.analysis.context import get_analysis
+from app.analysis.solution_evidence import (
+    build_solution_evidence_pack,
+    normalize_solution_judgment,
+)
 from app.llm.reasoner import LLMReasoner, ReasoningRequest
-from app.llm.selective import LlmPlan, build_evidence_pack, decide_llm_use
+from app.llm.selective import LlmPlan, decide_llm_use
 from app.metrics.base import Metric, MetricContext, MetricResult
 from app.metrics.solution_fit_normalize import normalize_solution_fit
 from app.scoring.readme_quality import analyze_readme, find_readme_content
@@ -57,8 +62,8 @@ class SolutionFitMetric(Metric):
     name = "solution_fit"
     tier = "llm"
     description = (
-        "Evaluates how well the repo matches the project context paragraph "
-        "(requires context.provided_context)."
+        "Compares context.provided_context to deterministic implementation evidence "
+        "(architecture, routes, AI/agent results, selected snippets). Never sends the full repo."
     )
     depends_on = []
     requires_context = True
@@ -72,6 +77,11 @@ class SolutionFitMetric(Metric):
             "alignment_score": {"type": "number"},
             "implements_claimed_solution": {"type": "boolean"},
             "context_requirements_met": {"type": "array"},
+            "implementation_matches_claim": {"type": "boolean"},
+            "verified_features": {"type": "array"},
+            "unsupported_features": {"type": "array"},
+            "partial_features": {"type": "array"},
+            "evidence_ids": {"type": "array", "items": {"type": "string"}},
             "gaps": {"type": "array", "items": {"type": "string"}},
             "strengths": {"type": "array", "items": {"type": "string"}},
             "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
@@ -79,7 +89,8 @@ class SolutionFitMetric(Metric):
         },
     }
 
-    def _build_data(self, section: dict[str, Any], snapshot: Any) -> dict[str, Any]:
+    def _build_data(self, section: dict[str, Any], snapshot: Any, pack: dict[str, Any] | None = None) -> dict[str, Any]:
+        section = normalize_solution_judgment(section, pack or {"evidence": []})
         normalized = normalize_solution_fit(section)
         reqs = normalized.get("context_requirements_met") or normalized.get("requirements_met") or []
         return {
@@ -87,6 +98,13 @@ class SolutionFitMetric(Metric):
             "relevance_score": normalized.get("relevance_score"),
             "alignment_score": normalized.get("alignment_score"),
             "implements_claimed_solution": bool(normalized.get("implements_claimed_solution")),
+            "implementation_matches_claim": bool(
+                normalized.get("implementation_matches_claim", normalized.get("implements_claimed_solution"))
+            ),
+            "verified_features": normalized.get("verified_features") or [],
+            "unsupported_features": normalized.get("unsupported_features") or [],
+            "partial_features": normalized.get("partial_features") or [],
+            "evidence_ids": normalized.get("evidence_ids") or [],
             "context_requirements_met": reqs,
             "requirements_met": reqs,  # legacy alias for frontend transition
             "gaps": normalized.get("gaps") or [],
@@ -112,6 +130,11 @@ class SolutionFitMetric(Metric):
                     "relevance_score": 0.0,
                     "alignment_score": 0.0,
                     "implements_claimed_solution": False,
+                    "implementation_matches_claim": False,
+                    "verified_features": [],
+                    "unsupported_features": [],
+                    "partial_features": [],
+                    "evidence_ids": [],
                     "context_requirements_met": [],
                     "requirements_met": [],
                     "gaps": ["No project context provided — cannot evaluate solution fit."],
@@ -121,14 +144,6 @@ class SolutionFitMetric(Metric):
                     "readme": _readme_payload(ctx.snapshot),
                 },
                 reason="missing_submission_context",
-            )
-
-        precomputed = (ctx.extras.get("llm_judgment") or {}).get("solution_fit")
-        if precomputed:
-            return MetricResult(
-                name=self.name,
-                status="ok",
-                data=self._build_data(precomputed, ctx.snapshot),
             )
 
         llm: LLMReasoner | None = ctx.extras.get("llm_client")
@@ -149,11 +164,23 @@ class SolutionFitMetric(Metric):
                 reason="llm_not_configured",
             )
 
-        candidates = _curate_paths(ctx.snapshot.tree, max_files=int(opts.get("max_files", 12)))
-        gh = ctx.extras.get("github_client")
-        if gh and candidates and not ctx.extras.get("skip_file_fetch"):
-            await gh.fetch_files(
-                ctx.snapshot, candidates, max_file_kb=int(opts.get("max_file_kb", 40))
+        analysis = get_analysis(ctx)
+        # Prefetch happens once in the pipeline. This metric does not fetch the repo.
+        pack = build_solution_evidence_pack(
+            code_facts=analysis.code_facts,
+            snapshot=ctx.snapshot,
+            static_metrics=ctx.prior_results,
+            submission_context=submission,
+            max_files=int(opts.get("max_files", 12)),
+        )
+        pack = {**pack, "prior_metric_summaries": _prior_summaries(ctx.prior_results)}
+
+        precomputed = (ctx.extras.get("llm_judgment") or {}).get("solution_fit")
+        if precomputed:
+            return MetricResult(
+                name=self.name,
+                status="ok",
+                data=self._build_data(precomputed, ctx.snapshot, pack),
             )
 
         plan: LlmPlan | None = ctx.extras.get("llm_plan")
@@ -163,25 +190,16 @@ class SolutionFitMetric(Metric):
                 llm_enabled=True,
                 static_metrics=ctx.prior_results,
                 submission_context=submission,
-                code_facts=ctx.extras.get("code_facts"),
+                code_facts=analysis.code_facts,
             )
-        pack = ctx.extras.get("llm_evidence_pack")
-        if pack is None:
-            pack = build_evidence_pack(
-                code_facts=ctx.extras.get("code_facts"),
-                snapshot=ctx.snapshot,
-                static_metrics=ctx.prior_results,
-                plan=plan,
-            )
-        if "prior_metric_summaries" not in pack:
-            pack = {**pack, "prior_metric_summaries": _prior_summaries(ctx.prior_results)}
 
         judgment = await llm.reason(
             ReasoningRequest(
                 metrics=["solution_fit"],
                 questions=plan.questions
                 or [
-                    "Does repository implementation meaningfully fit the provided hackathon problem statement?"
+                    "Does the implementation match the claimed project in PROJECT CONTEXT?",
+                    "Which claimed features are verified, unsupported, or only partially implemented?",
                 ],
                 evidence=pack,
                 submission_context=submission,
@@ -189,7 +207,7 @@ class SolutionFitMetric(Metric):
             )
         )
         section = judgment.get("solution_fit") or judgment
-        return MetricResult(name=self.name, status="ok", data=self._build_data(section, ctx.snapshot))
+        return MetricResult(name=self.name, status="ok", data=self._build_data(section, ctx.snapshot, pack))
 
 
 def _prior_summaries(prior: dict[str, Any]) -> dict[str, Any]:

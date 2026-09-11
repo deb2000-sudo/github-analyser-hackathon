@@ -9,6 +9,14 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
+_MANIFEST_FILENAMES = {
+    "package.json",
+    "requirements.txt",
+    "pyproject.toml",
+    "go.mod",
+    "Pipfile",
+}
+
 from app.analysis.call_graph import CallGraph, build_call_graph
 from app.analysis.data_flow import DataFlowGraph, build_data_flow
 from app.analysis.extract import extract_source_facts
@@ -85,7 +93,22 @@ class CodeFacts:
         }
 
 
-def build_code_facts(snapshot: RepoSnapshot) -> CodeFacts:
+@dataclass
+class InventoryStage:
+    """Repository inventory before source parsing."""
+
+    repository: dict[str, Any]
+    filtered_files: list[dict[str, Any]]
+    languages: dict[str, int]
+    manifests: dict[str, Any]
+    inventory: dict[str, Any]
+    structure: dict[str, Any]
+    file_inventory: FileInventory
+    contents: dict[str, str]
+
+
+def run_inventory_stage(snapshot: RepoSnapshot) -> InventoryStage:
+    """Tree → filtered files, languages, manifests, layout. No AST."""
     tree = list(snapshot.tree or [])
     raw_inventory = build_inventory(tree)
     files = list(raw_inventory.get("files") or [])
@@ -94,13 +117,7 @@ def build_code_facts(snapshot: RepoSnapshot) -> CodeFacts:
     manifests = dict(snapshot.package_manifests or {})
     for path, content in (snapshot.file_contents or {}).items():
         name = path.replace("\\", "/").split("/")[-1]
-        if name in {
-            "package.json",
-            "requirements.txt",
-            "pyproject.toml",
-            "go.mod",
-            "Pipfile",
-        } and path not in manifests:
+        if name in _MANIFEST_FILENAMES and path not in manifests:
             manifests[path] = content
     parsed_manifests = parse_dependencies(manifests)
 
@@ -126,26 +143,56 @@ def build_code_facts(snapshot: RepoSnapshot) -> CodeFacts:
         "commit_sha": ref.commit_sha,
     }
 
-    file_inventory = FileInventory.from_raw(raw_inventory)
     contents = dict(snapshot.file_contents or {})
     for path, content in (snapshot.package_manifests or {}).items():
         contents.setdefault(path, content)
-    source_facts, parse_warnings = extract_source_facts(
-        contents,
-        file_inventory=file_inventory,
-    )
-    call_graph = build_call_graph(source_facts)
-    data_flow = build_data_flow(source_facts)
-    return CodeFacts(
+
+    return InventoryStage(
         repository=repository,
         filtered_files=files,
         languages=languages,
         manifests=parsed_manifests,
         inventory=inventory,
         structure=structure,
-        file_inventory=file_inventory,
+        file_inventory=FileInventory.from_raw(raw_inventory),
+        contents=contents,
+    )
+
+
+def run_parse_stage(stage: InventoryStage) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Parse fetched sources into language-independent facts."""
+    return extract_source_facts(stage.contents, file_inventory=stage.file_inventory)
+
+
+def run_graph_stage(source_facts: list[dict[str, Any]]) -> tuple[CallGraph, DataFlowGraph]:
+    """Call graph and data-flow graph from parsed facts."""
+    return build_call_graph(source_facts), build_data_flow(source_facts)
+
+
+def assemble_code_facts(
+    stage: InventoryStage,
+    source_facts: list[dict[str, Any]],
+    parse_warnings: list[dict[str, Any]],
+    call_graph: CallGraph,
+    data_flow: DataFlowGraph,
+) -> CodeFacts:
+    return CodeFacts(
+        repository=stage.repository,
+        filtered_files=stage.filtered_files,
+        languages=stage.languages,
+        manifests=stage.manifests,
+        inventory=stage.inventory,
+        structure=stage.structure,
+        file_inventory=stage.file_inventory,
         source_facts=source_facts,
         parse_warnings=parse_warnings,
         call_graph=call_graph,
         data_flow=data_flow,
     )
+
+
+def build_code_facts(snapshot: RepoSnapshot) -> CodeFacts:
+    stage = run_inventory_stage(snapshot)
+    source_facts, parse_warnings = run_parse_stage(stage)
+    call_graph, data_flow = run_graph_stage(source_facts)
+    return assemble_code_facts(stage, source_facts, parse_warnings, call_graph, data_flow)

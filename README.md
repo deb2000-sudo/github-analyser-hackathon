@@ -4,11 +4,45 @@ Pluggable GitHub repo analysis for hackathon submissions.
 
 | Layer | Service |
 |---|---|
-| API | FastAPI on **Cloud Run** |
+| API | FastAPI on **Cloud Run** (service) |
+| Worker | **Cloud Run Job** (`python -m app.worker`) |
 | Jobs | **Firestore** (Firebase Admin) |
 | LLM | **Vertex AI Gemini** |
 
 The caller selects which metrics to run per request — the service never hardcodes “always check everything.”
+
+## Architecture
+
+```
+Client
+  → FastAPI Cloud Run Service
+      → validate request
+      → create Firestore job (queued)
+      → trigger Cloud Run Job
+      → return job_id
+  → GET /analyze/{job_id}  (poll)
+
+Cloud Run Job (same image, python -m app.worker)
+  → read Firestore job
+  → claim running
+  → analyze repository
+  → write result
+  → succeeded | failed
+  → exit
+```
+
+One container, two entrypoints:
+
+| Role | Command |
+|---|---|
+| API | `uvicorn app.main:app --host 0.0.0.0 --port $PORT` |
+| Worker | `python -m app.worker` (`ANALYSIS_JOB_ID` set per execution) |
+
+Job status is always one of `queued`, `running`, `succeeded`, `failed`. Worker retries reuse the same Cloud Run execution id and **never overwrite** a `succeeded` or `failed` report.
+
+Locally, `CLOUD_RUN_JOB_NAME` is unset, so `POST /analyze` runs the worker **inline** on a FastAPI background task (same Firestore job document).
+
+Static analysis remains the only engine that touches third-party repositories. **Runtime execution of submission code is not implemented.** See [Runtime sandbox threat model](docs/runtime-sandbox-security.md). Do not run untrusted repos until that design is reviewed and GCP isolation is in place.
 
 ## Quick start (local)
 
@@ -56,6 +90,7 @@ Grant the Cloud Run service account:
 
 - `roles/aiplatform.user` — Vertex AI Gemini
 - `roles/datastore.user` — Firestore
+- `roles/run.invoker` on the **worker job** (`github-analyser-worker`) — API triggers executions
 
 ## Deploy (Cloud Build → Cloud Run)
 
@@ -97,7 +132,7 @@ done
 gcloud builds submit --config cloudbuild.yaml --project=nxt-acad-hackathon
 ```
 
-The final deploy step prints the **Cloud Run URL**. Vertex AI settings are baked into `cloudbuild.yaml` substitutions; override only if needed:
+The final deploy step prints the **Cloud Run URL**. It also deploys Cloud Run Job `github-analyser-worker` from the **same image**. Vertex AI settings are baked into `cloudbuild.yaml` substitutions; override only if needed:
 
 ```bash
 gcloud builds submit --config cloudbuild.yaml \
@@ -114,6 +149,7 @@ gcloud builds submit --config cloudbuild.yaml \
 | `_GCP_LOCATION` | `us-central1` | `GOOGLE_CLOUD_LOCATION` |
 | `_GEMINI_MODEL` | `gemini-2.5-flash` | Vertex Gemini model |
 | `_FIRESTORE_COLLECTION` | `github_analysis_jobs` | Firestore jobs collection |
+| `_WORKER_JOB` | `github-analyser-worker` | Cloud Run Job name |
 | `_RUN_SERVICE_ACCOUNT` | `nxt-acad-ai-hackathon-evaluate@nxt-acad-hackathon.iam.gserviceaccount.com` | Cloud Run runtime SA |
 
 **Notes:**
@@ -121,6 +157,7 @@ gcloud builds submit --config cloudbuild.yaml \
 - Firebase + `GITHUB_TOKEN` mounted via `--update-secrets` (your existing Secret Manager names).
 - Vertex AI uses the **Cloud Run runtime SA** (ADC), not the Firebase Admin key.
 - Image tagged with `$BUILD_ID` (deploy), `$SHORT_SHA` (git triggers), and `latest`.
+- API service and worker job share that image. The job command is `python -m app.worker`; the service stays `uvicorn`.
 
 ### Manual deploy (alternative)
 
@@ -135,20 +172,35 @@ gcloud run deploy github-analyser \
   --memory 1Gi \
   --timeout 300 \
   --project nxt-acad-hackathon
+
+# Worker job (same image). After `docker build` / Cloud Build:
+# gcloud run jobs deploy github-analyser-worker \
+#   --image IMAGE --region us-central1 \
+#   --command /app/.venv/bin/python --args=-m,app.worker \
+#   --task-timeout=1200 --max-retries=2 \
+#   --set-env-vars APP_ROLE=worker,...
 ```
+
+Then set `CLOUD_RUN_JOB_NAME=github-analyser-worker` on the API service.
 
 ## Endpoints
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /analyze` | Submit one repo |
-| `POST /analyze/batch` | Submit many |
-| `GET /analyze/{job_id}` | Poll status + result (Firestore) |
+| `POST /analyze` | Validate, create Firestore job (`queued`), start worker, return `job_id` |
+| `POST /analyze/batch` | Same, many jobs |
+| `GET /analyze/{job_id}` | Poll status + result (Firestore). Status: `queued` \| `running` \| `succeeded` \| `failed` |
 | `GET /analyze/{job_id}?wait_seconds=60` | Poll with long-wait (blocks up to 120s) |
-| `POST /analyze/sync` | Submit + wait for full result in one call |
+| `POST /analyze/sync` | **In-process** submit + wait (see below) |
 | `GET /metrics` | Metric catalogue + schemas |
 | `GET /rubrics` | Default rubric weights + max total score |
-| `GET /health` | Liveness |
+| `GET /health` | Liveness (`worker_mode` is `cloud_run_job` or `inline`) |
+
+### `POST /analyze/sync`
+
+Kept for compatibility. It creates a Firestore job and runs analysis **inside the API container**, then returns the finished `JobResponse`.
+
+It does **not** use the Cloud Run Job worker. The Cloud Run *service* request timeout (currently 300s) still applies. Prefer `POST /analyze` + `GET /analyze/{job_id}` in production.
 
 ### Public repo gate
 
@@ -216,6 +268,6 @@ Full-stack partial credit: frontend-only or backend-only earns **20%** of that r
 | `FIREBASE_PRIVATE_KEY` / `FIREBASE_CLIENT_EMAIL` | Local Firebase + GCP auth (no ADC) |
 | `GITHUB_TOKEN` | GitHub API rate limits |
 | `RUBRIC_WEIGHTS_JSON` | Default rubric weights (JSON array); see `GET /rubrics` |
-#   g i t h u b - a n a l y s e r - h a c k a t h o n 
- 
- # github-analyser-hackathon
+| `CLOUD_RUN_JOB_NAME` | Worker job name. Unset = inline analysis on the API process |
+| `CLOUD_RUN_JOBS_LOCATION` | Region for the worker job (defaults to `GOOGLE_CLOUD_LOCATION`) |
+| `ANALYSIS_JOB_ID` | Set per worker execution; required for `python -m app.worker` |

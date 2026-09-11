@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, TYPE_CHECKING
 
 from app.github.client import RepoSnapshot
+
+if TYPE_CHECKING:
+    from app.analysis.context import AnalysisContext
 
 
 @dataclass
@@ -13,6 +16,7 @@ class MetricContext:
     options: dict[str, Any] = field(default_factory=dict)
     prior_results: dict[str, Any] = field(default_factory=dict)
     extras: dict[str, Any] = field(default_factory=dict)
+    analysis: AnalysisContext | None = None
 
 
 @dataclass

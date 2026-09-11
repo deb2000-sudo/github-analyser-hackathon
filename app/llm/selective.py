@@ -10,6 +10,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.analysis.agent_evidence import collect_agent_evidence, evidence_needs_semantic
 from app.analysis.ai_fake import (
     RULE_DISCARDED,
     RULE_FALLBACK,
@@ -77,7 +78,8 @@ def decide_llm_use(
 
     metrics = static_metrics or {}
     ai = metrics.get("ai_usage") or {}
-    agent_pkgs = list(agent_deps or ai.get("agent_frameworks_found") or [])
+    if agent_deps and not ai.get("agent_frameworks_found"):
+        ai = {**ai, "agent_frameworks_found": list(agent_deps)}
     has_context = bool(((submission_context or {}).get("provided_context") or "").strip())
     conflicts, uncertainties = _conflicts_and_uncertainties(ai, confidence_threshold)
     plan.conflicts = conflicts
@@ -85,29 +87,40 @@ def decide_llm_use(
     low_confidence = bool(uncertainties)
     has_conflict = bool(conflicts)
     invocation = bool(ai.get("model_invocation_detected"))
-    agent_like = _has_agent_like_symbols(code_facts)
+    agent_evidence = None
+    if code_facts is not None:
+        agent_evidence = collect_agent_evidence(
+            getattr(code_facts, "source_facts", None) or [],
+            parsed_manifests=getattr(code_facts, "manifests", None),
+            call_graph=getattr(code_facts, "call_graph", None),
+            ai_usage=ai,
+        )
+    agent_like = evidence_needs_semantic(agent_evidence) if agent_evidence else _has_agent_like_symbols(code_facts)
 
     if "solution_fit" in requested and has_context:
         plan.metrics.append("solution_fit")
-        plan.questions.append(
-            "Does repository implementation meaningfully fit the provided hackathon problem statement?"
+        plan.questions.extend(
+            [
+                "Does the implementation match the claimed project in PROJECT CONTEXT?",
+                "Which claimed features are verified, unsupported, or only partially implemented?",
+            ]
         )
         plan.reasons.append("solution_fit_requires_semantic_interpretation")
 
     semantic_agents = bool(
         "agent_analysis" in requested
-        and (agent_pkgs or agent_like or invocation or has_conflict or low_confidence)
+        and (agent_like or invocation or has_conflict or low_confidence)
     )
     if semantic_agents:
         plan.metrics.append("agent_analysis")
         plan.questions.extend(
             [
-                "Is this meaningful agent orchestration?",
-                "Is this just a simple LLM wrapper?",
-                "Are the extracted components semantically being used as agents/tools/workflows?",
+                "Classify as NO_AGENT, LLM_WRAPPER, LINEAR_CHAIN, TOOL_USING_LLM, WORKFLOW_ORCHESTRATION, or GENUINE_AGENT_ORCHESTRATION.",
+                "Cite evidence_ids. Do not classify as an agent merely because langchain, langgraph, or agent appears in dependencies or README.",
+                "Are extracted components semantically used as agents, tools, or workflows?",
             ]
         )
-        if agent_pkgs or agent_like:
+        if agent_like:
             plan.reasons.append("agent_analysis_requires_semantic_interpretation")
         elif invocation:
             plan.reasons.append("wrapper_vs_orchestration_requires_interpretation")
@@ -153,12 +166,20 @@ def build_evidence_pack(
     call_graph = getattr(code_facts, "call_graph", None)
     data_flow = getattr(code_facts, "data_flow", None)
 
+    agent_evidence = collect_agent_evidence(
+        facts,
+        manifests=getattr(snapshot, "package_manifests", None),
+        call_graph=call_graph,
+        file_contents=files,
+        ai_usage=ai,
+    )
     pack = {
         "code_facts": _relevant_code_facts(code_facts, facts),
         "snippets": _select_snippets(files, ai, facts, max_snippets=max_snippets),
         "call_paths": _call_paths(ai, call_graph),
         "data_flow_paths": _data_flow_paths(ai, data_flow),
         "deterministic_findings": _deterministic_findings(metrics),
+        "agent_evidence": agent_evidence,
         "uncertainties": list(plan.uncertainties),
         "conflicts": list(plan.conflicts),
         "invoke_reasons": list(plan.reasons),

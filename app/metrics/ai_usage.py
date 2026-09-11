@@ -12,7 +12,7 @@ from app.analysis.ai_evidence import (
 )
 from app.analysis.ai_fake import detect_fake_ai
 from app.analysis.ai_flow import analyze_ai_flow
-from app.analysis.facts import build_code_facts
+from app.analysis.context import get_analysis
 from app.metrics.ai_imports import reconcile_ai_dependencies, scan_manifests
 from app.metrics.ai_packages import is_agent_framework
 from app.metrics.base import Metric, MetricContext, MetricResult
@@ -59,18 +59,21 @@ class AiUsageMetric(Metric):
     }
 
     async def run(self, ctx: MetricContext) -> MetricResult:
-        facts = ctx.extras.get("code_facts")
-        if facts is None:
-            facts = build_code_facts(ctx.snapshot)
+        analysis = get_analysis(ctx)
+        facts = analysis.code_facts
+        computed_here = analysis.ai_evidence is None
+        evidence = analysis.ai_evidence
+        if computed_here:
+            evidence = detect_ai_evidence(
+                getattr(facts, "source_facts", None) or [],
+                manifests=ctx.snapshot.package_manifests,
+                parsed_manifests=getattr(facts, "manifests", None),
+                file_contents=ctx.snapshot.file_contents,
+                submission_context=ctx.extras.get("submission_context"),
+            )
+            analysis.ai_evidence = evidence
 
         raw_manifest_deps, _ = scan_manifests(ctx.snapshot.package_manifests)
-        evidence = detect_ai_evidence(
-            getattr(facts, "source_facts", None) or [],
-            manifests=ctx.snapshot.package_manifests,
-            parsed_manifests=getattr(facts, "manifests", None),
-            file_contents=ctx.snapshot.file_contents,
-            submission_context=ctx.extras.get("submission_context"),
-        )
 
         code_hits = _code_hits_from_evidence(evidence)
         reconciled = reconcile_ai_dependencies(raw_manifest_deps, code_hits)
@@ -96,18 +99,25 @@ class AiUsageMetric(Metric):
                     integration = guessed
 
         llm_providers = llm_providers_from_evidence(evidence)
-        verification = analyze_ai_flow(
-            getattr(facts, "source_facts", None) or [],
-            getattr(facts, "call_graph", None),
-            getattr(facts, "data_flow", None),
-        )
-        findings = detect_fake_ai(
-            getattr(facts, "source_facts", None) or [],
-            evidence=evidence,
-            verification=verification,
-            call_graph=getattr(facts, "call_graph", None),
-            manifests=ctx.snapshot.package_manifests,
-        )
+        verification = analysis.ai_verification
+        if computed_here or not verification:
+            verification = analyze_ai_flow(
+                getattr(facts, "source_facts", None) or [],
+                getattr(facts, "call_graph", None),
+                getattr(facts, "data_flow", None),
+            )
+            analysis.ai_verification = verification
+        if computed_here:
+            findings = detect_fake_ai(
+                getattr(facts, "source_facts", None) or [],
+                evidence=evidence,
+                verification=verification,
+                call_graph=getattr(facts, "call_graph", None),
+                manifests=ctx.snapshot.package_manifests,
+            )
+            analysis.ai_findings = findings
+        else:
+            findings = list(analysis.ai_findings)
         diagnostics = {
             "manifest_deps_raw": reconciled["manifest_deps_raw"],
             "manifest_only_deps": reconciled["manifest_only_deps"],

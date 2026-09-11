@@ -154,6 +154,121 @@ class BatchAnalyzeResponse(BaseModel):
     jobs: list[JobCreatedResponse]
 
 
+class EvidenceRecord(BaseModel):
+    model_config = ConfigDict(
+        extra="allow",
+        json_schema_extra={
+            "example": {
+                "id": "ev_123",
+                "rule_id": "AI.DYNAMIC_INPUT",
+                "file": "backend/chat.py",
+                "line": 32,
+                "symbol": "chat",
+                "description": "Request message reaches Gemini model invocation",
+            }
+        },
+    )
+
+    id: str | None = None
+    rule_id: str | None = None
+    file: str | None = None
+    line: int | None = None
+    symbol: str | None = None
+    description: str | None = None
+
+
+class AiResultSummary(BaseModel):
+    model_config = ConfigDict(
+        extra="allow",
+        json_schema_extra={
+            "example": {
+                "detected": True,
+                "providers": ["gemini"],
+                "integration_level": 6,
+                "classification": "genuine_ai_integration",
+                "model_invocation_detected": True,
+                "user_input_reaches_model": True,
+                "model_output_used": True,
+                "hardcoded_response_detected": False,
+                "confidence": 0.95,
+            }
+        },
+    )
+
+    detected: bool = False
+    providers: list[str] = Field(default_factory=list)
+    integration_level: int = 0
+    classification: str = "no_ai"
+    model_invocation_detected: bool = False
+    user_input_reaches_model: bool = False
+    model_output_used: bool = False
+    hardcoded_response_detected: bool = False
+    confidence: float = 0.0
+
+
+class AnalysisResult(BaseModel):
+    """Explainable job result. Legacy keys (`repo`, `verdict`, `analysis`, `context`) are allowed."""
+
+    model_config = ConfigDict(
+        extra="allow",
+        json_schema_extra={
+            "example": {
+                "access": {"is_public": True},
+                "repository": {"owner": "owner", "name": "repo"},
+                "architecture": {"application_type": "full_stack"},
+                "frontend_backend": {"connected": True},
+                "ai": {
+                    "detected": True,
+                    "providers": ["gemini"],
+                    "integration_level": 6,
+                    "classification": "genuine_ai_integration",
+                    "model_invocation_detected": True,
+                    "user_input_reaches_model": True,
+                    "model_output_used": True,
+                    "hardcoded_response_detected": False,
+                    "confidence": 0.95,
+                },
+                "agents": {"classification": "NO_AGENT"},
+                "solution_fit": {"implementation_matches_claim": True},
+                "metrics": {},
+                "scoring": {"total_score": 0},
+                "evidence": [
+                    {
+                        "id": "ev_123",
+                        "rule_id": "AI.DYNAMIC_INPUT",
+                        "file": "backend/chat.py",
+                        "line": 32,
+                        "symbol": "chat",
+                        "description": "Request message reaches Gemini model invocation",
+                    }
+                ],
+                "limitations": [
+                    "Dynamic import could not be resolved",
+                    "Frontend URL constructed at runtime",
+                ],
+                "metadata": {"version": "0.1.0", "uncertain_results_are_not_proven": True},
+            }
+        },
+    )
+
+    access: dict[str, Any] = Field(default_factory=dict)
+    repository: dict[str, Any] = Field(default_factory=dict)
+    architecture: dict[str, Any] = Field(default_factory=dict)
+    frontend_backend: dict[str, Any] = Field(default_factory=dict)
+    ai: AiResultSummary = Field(default_factory=AiResultSummary)
+    agents: dict[str, Any] = Field(default_factory=dict)
+    solution_fit: dict[str, Any] = Field(default_factory=dict)
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    scoring: dict[str, Any] = Field(default_factory=dict)
+    evidence: list[EvidenceRecord] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    repo: dict[str, Any] | None = None
+    context: dict[str, Any] | None = None
+    verdict: dict[str, Any] | None = None
+    analysis: dict[str, Any] | None = None
+
+
 class JobResponse(BaseModel):
     job_id: str
     status: JobStatusLiteral
@@ -161,7 +276,7 @@ class JobResponse(BaseModel):
     metrics_requested: list[str]
     context: dict[str, Any] | None = None
     commit_sha: str | None = None
-    result: dict[str, Any] | None = None
+    result: AnalysisResult | None = None
     error: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
@@ -201,3 +316,4 @@ class HealthResponse(BaseModel):
     status: str
     llm_enabled: bool
     version: str
+    worker_mode: Literal["cloud_run_job", "inline"] = "inline"

@@ -16,6 +16,7 @@ substitutions:
   _GCP_LOCATION: us-central1
   _GEMINI_MODEL: gemini-2.5-flash
   _FIRESTORE_COLLECTION: github_analysis_jobs
+  _WORKER_JOB: github-analyser-worker
   # Cloud Run runtime SA — same project as this Cloud Build (must have Secret Manager access).
   # Do not use nxt-acad-ai-hackathon-evaluator@nxt-create-deb (different project → actAs denied).
   _RUN_SERVICE_ACCOUNT: github-analyser-sa@github-analyser-786.iam.gserviceaccount.com
@@ -55,7 +56,7 @@ steps:
       - --all-tags
       - ${_REGION}-docker.pkg.dev/$PROJECT_ID/github-analyser/github-analyser
 
-  # Step 4: Deploy to Cloud Run
+  # Step 4: Deploy Cloud Run Job (worker) then Cloud Run Service (API)
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk
     entrypoint: bash
     args:
@@ -63,6 +64,31 @@ steps:
       - |
         set -euo pipefail
         IMAGE=${_REGION}-docker.pkg.dev/$PROJECT_ID/github-analyser/github-analyser:$BUILD_ID
+        SECRETS=FIREBASE_PROJECT_ID=FIREBASE_PROJECT_ID:latest,FIREBASE_PRIVATE_KEY=FIREBASE_PRIVATE_KEY:latest,FIREBASE_CLIENT_EMAIL=FIREBASE_CLIENT_EMAIL:latest,FIREBASE_DATABASE_URL=FIREBASE_DATABASE_URL:latest,FIREBASE_WEB_API_KEY=FIREBASE_WEB_API_KEY:latest,GITHUB_TOKEN=GITHUB_TOKEN:latest
+        SHARED_ENV=ENVIRONMENT=${_ENVIRONMENT},GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_CLOUD_LOCATION=${_GCP_LOCATION},GEMINI_MODEL=${_GEMINI_MODEL},VERTEX_ENABLED=true,FIRESTORE_COLLECTION_JOBS=${_FIRESTORE_COLLECTION}
+
+        gcloud run jobs deploy ${_WORKER_JOB} \
+          --image="$$IMAGE" \
+          --region=${_REGION} \
+          --service-account=${_RUN_SERVICE_ACCOUNT} \
+          --command=/app/.venv/bin/python \
+          --args=-m,app.worker \
+          --memory=1Gi \
+          --cpu=1 \
+          --task-timeout=1200 \
+          --max-retries=2 \
+          --tasks=1 \
+          --parallelism=1 \
+          --update-secrets="$$SECRETS" \
+          --set-env-vars="$$SHARED_ENV,APP_ROLE=worker" \
+          --project=$PROJECT_ID
+
+        gcloud run jobs add-iam-policy-binding ${_WORKER_JOB} \
+          --region=${_REGION} \
+          --member="serviceAccount:${_RUN_SERVICE_ACCOUNT}" \
+          --role=roles/run.invoker \
+          --project=$PROJECT_ID \
+          --quiet
 
         gcloud run deploy github-analyser \
           --image="$$IMAGE" \
@@ -77,13 +103,14 @@ steps:
           --concurrency=10 \
           --min-instances=0 \
           --max-instances=10 \
-          --update-secrets=FIREBASE_PROJECT_ID=FIREBASE_PROJECT_ID:latest,FIREBASE_PRIVATE_KEY=FIREBASE_PRIVATE_KEY:latest,FIREBASE_CLIENT_EMAIL=FIREBASE_CLIENT_EMAIL:latest,FIREBASE_DATABASE_URL=FIREBASE_DATABASE_URL:latest,FIREBASE_WEB_API_KEY=FIREBASE_WEB_API_KEY:latest,GITHUB_TOKEN=GITHUB_TOKEN:latest \
-          --set-env-vars=ENVIRONMENT=${_ENVIRONMENT},GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_CLOUD_LOCATION=${_GCP_LOCATION},GEMINI_MODEL=${_GEMINI_MODEL},VERTEX_ENABLED=true,FIRESTORE_COLLECTION_JOBS=${_FIRESTORE_COLLECTION},HOST=0.0.0.0 \
+          --update-secrets="$$SECRETS" \
+          --set-env-vars="$$SHARED_ENV,HOST=0.0.0.0,CLOUD_RUN_JOB_NAME=${_WORKER_JOB},CLOUD_RUN_JOBS_LOCATION=${_REGION}" \
           --project=$PROJECT_ID
 
         SERVICE_URL=$$(gcloud run services describe github-analyser \
           --region=${_REGION} --project=$PROJECT_ID --format='value(status.url)')
-        echo "Deployed: $$SERVICE_URL (runtime SA: ${_RUN_SERVICE_ACCOUNT})"
+        echo "Deployed API: $$SERVICE_URL"
+        echo "Worker job: ${_WORKER_JOB} (runtime SA: ${_RUN_SERVICE_ACCOUNT})"
     env:
       - CLOUDSDK_COMPUTE_REGION=${_REGION}
 

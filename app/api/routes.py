@@ -8,6 +8,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException
 
 from app import __version__
 from app.config import get_settings
+from app.dispatch import dispatch_analysis_job
 from app.jobs import Job, JobStatus, JobStore, new_job_id
 from app.metrics.registry import catalogue, resolve_requested
 from app.pipeline.runner import run_pipeline
@@ -56,15 +57,20 @@ async def _enqueue(req: AnalyzeRequest, background: BackgroundTasks) -> Job:
     )
     store = JobStore()
     await asyncio.to_thread(store.create, job)
-
-    background.add_task(run_pipeline, job.id)
+    await dispatch_analysis_job(job.id, background)
     return job
 
 
 @router.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
     settings = get_settings()
-    return HealthResponse(status="ok", llm_enabled=settings.llm_enabled, version=__version__)
+    mode = "cloud_run_job" if settings.use_cloud_run_jobs else "inline"
+    return HealthResponse(
+        status="ok",
+        llm_enabled=settings.llm_enabled,
+        version=__version__,
+        worker_mode=mode,
+    )
 
 
 @router.get("/metrics", response_model=MetricsCatalogueResponse)
@@ -145,7 +151,12 @@ async def get_job(job_id: str, wait_seconds: int = 0) -> JobResponse:
 
 @router.post("/analyze/sync", response_model=JobResponse)
 async def analyze_sync(body: AnalyzeRequest, wait_seconds: int = 120) -> JobResponse:
-    """Submit analysis and wait for the result (max wait_seconds=120)."""
+    """Submit analysis and wait for the result (max wait_seconds=120).
+
+    Runs in the API process (not the Cloud Run Job worker). Subject to the
+    Cloud Run *service* request timeout. Production clients should use
+    POST /analyze and poll GET /analyze/{job_id}.
+    """
     wait_seconds = max(5, min(wait_seconds, 120))
     try:
         metrics = resolve_requested(body.metrics)

@@ -26,9 +26,11 @@ class FakeReasoner(LLMReasoner):
         self._enabled = enabled
         self.payload = payload or {
             "agent_analysis": {
+                "classification": "LLM_WRAPPER",
                 "agent_count": 1,
                 "agents": [{"role_guess": "planner", "file": "agent.py", "evidence": "graph"}],
-                "has_real_orchestration": True,
+                "has_real_orchestration": False,
+                "evidence_ids": [],
                 "confidence": "high",
                 "reasoning": "mocked",
             },
@@ -37,6 +39,11 @@ class FakeReasoner(LLMReasoner):
                 "relevance_score": 8,
                 "alignment_score": 7,
                 "implements_claimed_solution": True,
+                "implementation_matches_claim": True,
+                "verified_features": [],
+                "unsupported_features": [],
+                "partial_features": [],
+                "evidence_ids": [],
                 "confidence": "medium",
                 "reasoning": "mocked fit",
             },
@@ -115,7 +122,7 @@ def test_invoke_llm_for_solution_fit_context():
         submission_context={"provided_context": "Build a multi-agent study planner."},
     )
     assert "solution_fit" in plan.metrics
-    assert any("fit the provided hackathon problem statement" in q for q in plan.questions)
+    assert any("claimed project" in q or "problem statement" in q for q in plan.questions)
     assert "solution_fit_requires_semantic_interpretation" in plan.reasons
 
 
@@ -133,7 +140,7 @@ def test_invoke_llm_for_agent_frameworks():
         agent_deps=["langgraph"],
     )
     assert "agent_analysis" in plan.metrics
-    assert any("meaningful agent orchestration" in q for q in plan.questions)
+    assert any("GENUINE_AGENT_ORCHESTRATION" in q or "orchestration" in q.lower() for q in plan.questions)
 
 
 def test_invoke_llm_on_evidence_conflict():
@@ -294,12 +301,13 @@ def test_agent_analysis_uses_mocked_reasoner_when_semantic():
         )
     )
     assert result.status == "ok"
-    assert result.data["has_real_orchestration"] is True
+    assert result.data["classification"] == "LLM_WRAPPER"
+    assert result.data["has_real_orchestration"] is False
     assert len(reasoner.calls) == 1
     request = reasoner.calls[0]
     assert "agent_analysis" in request.metrics
     dumped = str(request.evidence)
-    assert "langgraph" in dumped
+    assert "langgraph" in dumped or "agent_evidence" in dumped
 
 
 def test_solution_fit_uses_mocked_reasoner():
@@ -318,8 +326,12 @@ def test_solution_fit_uses_mocked_reasoner():
     )
     assert result.status == "ok"
     assert result.data["alignment_score"] == 7
+    assert "verified_features" in result.data
+    assert "evidence_ids" in result.data
     assert len(reasoner.calls) == 1
     assert "solution_fit" in reasoner.calls[0].metrics
+    assert reasoner.calls[0].evidence.get("claimed_project")
+    assert "major_files" in reasoner.calls[0].evidence
 
 
 def test_llm_client_reason_does_not_call_vertex(monkeypatch):

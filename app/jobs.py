@@ -7,6 +7,7 @@ from typing import Any
 from uuid import uuid4
 
 from google.cloud import firestore
+from google.cloud.firestore_v1 import transactional
 
 from app.config import get_settings
 from app.firebase_app import get_firestore
@@ -25,6 +26,25 @@ class JobStatus(str, enum.Enum):
     running = "running"
     succeeded = "succeeded"
     failed = "failed"
+
+
+TERMINAL_STATUSES = frozenset({JobStatus.succeeded.value, JobStatus.failed.value})
+
+
+def claim_outcome(status: str | None) -> str:
+    """queued/running → claim; succeeded/failed → already_terminal."""
+    if status in TERMINAL_STATUSES:
+        return "already_terminal"
+    return "claim"
+
+
+def can_complete(status: str | None, stored_execution: str | None, execution_id: str) -> bool:
+    """Refuse to overwrite a finished report or a job claimed by another execution."""
+    if status in TERMINAL_STATUSES:
+        return False
+    if stored_execution and stored_execution != execution_id:
+        return False
+    return True
 
 
 @dataclass
@@ -107,3 +127,52 @@ class JobStore:
     def update(self, job_id: str, **fields: Any) -> None:
         fields["updated_at"] = utcnow()
         self._col().document(job_id).update(fields)
+
+    def claim(self, job_id: str, execution_id: str) -> str:
+        """Atomically mark the job running. Retries of a finished job are no-ops."""
+        ref = self._col().document(job_id)
+
+        @transactional
+        def _claim(transaction: firestore.Transaction) -> str:
+            snap = ref.get(transaction=transaction)
+            if not snap.exists:
+                return "missing"
+            data = snap.to_dict() or {}
+            outcome = claim_outcome(str(data.get("status") or ""))
+            if outcome == "already_terminal":
+                return "already_terminal"
+            transaction.update(
+                ref,
+                {
+                    "status": JobStatus.running.value,
+                    "worker_execution_id": execution_id,
+                    "error": None,
+                    "updated_at": utcnow(),
+                },
+            )
+            return "claimed"
+
+        return _claim(self._db.transaction())
+
+    def complete(self, job_id: str, execution_id: str, **fields: Any) -> str:
+        """Write a terminal status only if this execution still owns the job."""
+        ref = self._col().document(job_id)
+        payload = dict(fields)
+        payload["updated_at"] = utcnow()
+
+        @transactional
+        def _complete(transaction: firestore.Transaction) -> str:
+            snap = ref.get(transaction=transaction)
+            if not snap.exists:
+                return "missing"
+            data = snap.to_dict() or {}
+            if not can_complete(
+                str(data.get("status") or ""),
+                data.get("worker_execution_id"),
+                execution_id,
+            ):
+                return "ignored"
+            transaction.update(ref, payload)
+            return "written"
+
+        return _complete(self._db.transaction())

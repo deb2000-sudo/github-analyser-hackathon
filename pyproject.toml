@@ -23,6 +23,7 @@ dependencies = [
 
 [project.scripts]
 github-analyser = "app.__main__:main"
+github-analyser-worker = "app.worker:main"
 
 [dependency-groups]
 dev = ["pytest>=9.0"]

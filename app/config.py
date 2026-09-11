@@ -62,6 +62,28 @@ class Settings(BaseSettings):
     hackathon_end: str | None = None
     rubric_weights_json: str | None = Field(default=None, validation_alias="RUBRIC_WEIGHTS_JSON")
 
+    # Phase 18 — Cloud Run Job worker. Unset → API runs analysis inline (local/dev).
+    cloud_run_job_name: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("CLOUD_RUN_JOB_NAME"),
+    )
+    cloud_run_jobs_location: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("CLOUD_RUN_JOBS_LOCATION"),
+    )
+    analysis_job_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("ANALYSIS_JOB_ID"),
+    )
+
+    @property
+    def worker_job_location(self) -> str:
+        return self.cloud_run_jobs_location or self.gcp_location
+
+    @property
+    def use_cloud_run_jobs(self) -> bool:
+        return bool(self.cloud_run_job_name)
+
     @field_validator("firebase_private_key")
     @classmethod
     def _normalize_private_key(cls, value: str | None) -> str | None:

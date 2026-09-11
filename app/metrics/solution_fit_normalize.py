@@ -26,6 +26,11 @@ def normalize_solution_fit(section: dict[str, Any]) -> dict[str, Any]:
         out["relevance_score"] = relevance
         out["alignment_score"] = 0.0
         out["implements_claimed_solution"] = False
+        out["implementation_matches_claim"] = False
+        out.setdefault("verified_features", [])
+        out.setdefault("unsupported_features", out.get("unsupported_features") or [])
+        out.setdefault("partial_features", [])
+        out.setdefault("evidence_ids", out.get("evidence_ids") or [])
         if not out.get("reasoning"):
             out["reasoning"] = (
                 "Repository does not match the project context — different product or domain."
@@ -41,6 +46,7 @@ def normalize_solution_fit(section: dict[str, Any]) -> dict[str, Any]:
         alignment = 0.0
     out["alignment_score"] = max(0.0, min(10.0, alignment))
     out["implements_claimed_solution"] = bool(out.get("implements_claimed_solution")) and alignment >= 5.0
+    out["implementation_matches_claim"] = bool(out["implements_claimed_solution"])
 
     # Support legacy LLM field name
     if out.get("context_requirements_met") is None and out.get("requirements_met") is not None:

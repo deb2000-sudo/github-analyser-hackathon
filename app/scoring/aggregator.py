@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.analysis.frameworks import BACKEND_DISPLAY, FRONTEND_DISPLAY
+from app.analysis.report import build_analysis_result
 from app.github.validation import RepoAccessInfo, access_payload
 from app.scoring.ai_evidence import has_deterministic_ai_signals, score_ai_integration
 from app.scoring.llm_providers import detect_llm_providers
@@ -134,10 +135,14 @@ def _score_agent_analysis(metrics: dict[str, Any], max_score: float) -> tuple[fl
             f"{data.get('reasoning') or 'no agent evidence'}. 0 marks."
         )
 
-    has_orch = bool(data.get("has_real_orchestration"))
+    classification = str(data.get("classification") or "")
+    has_orch = bool(
+        data.get("has_real_orchestration")
+        or classification in {"WORKFLOW_ORCHESTRATION", "GENUINE_AGENT_ORCHESTRATION"}
+    )
     agents = data.get("agents") or []
     agent_count = int(data.get("agent_count") or len(agents))
-    llm_reason = (data.get("reasoning") or "").strip()
+    llm_reason = ((f"Classification {classification}. " if classification else "") + (data.get("reasoning") or "")).strip()
 
     if has_orch and fw_count >= 2:
         return max_score, (
@@ -372,6 +377,7 @@ def build_gated_result(
     github_url: str,
     submission_context: dict[str, Any] | None,
     request_scoring: dict[str, Any] | None = None,
+    timings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     scoring = aggregate_scores(
         {},
@@ -379,17 +385,21 @@ def build_gated_result(
         access=access,
         gate_reason=access.reason,
     )
-    return {
-        "access": access_payload(access),
-        "scoring": scoring,
-        "repo": {
-            "owner": access.owner,
-            "name": access.name,
-            "full_name": f"{access.owner}/{access.name}",
-            "default_branch": access.default_branch,
-            "commit_sha": None,
-            "github_url": github_url,
-        },
-        "context": submission_context or None,
-        "metrics": {},
+    repository = {
+        "owner": access.owner,
+        "name": access.name,
+        "full_name": f"{access.owner}/{access.name}",
+        "default_branch": access.default_branch,
+        "commit_sha": None,
+        "github_url": github_url,
     }
+    return build_analysis_result(
+        access=access_payload(access),
+        repository=repository,
+        metrics={},
+        scoring=scoring,
+        context=submission_context or None,
+        gated=True,
+        gate_reason=access.reason,
+        timings=timings,
+    )
